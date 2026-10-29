@@ -14,6 +14,13 @@ spec:
     repo: tibrezus/harmostes-template-fork-maintenance
     path: template.yaml
     branch: main
+    # HMAC secret for landing webhooks (pushes to THIS repo → the
+    # controller's /webhook/templates/fork-maintenance). Per-environment
+    # Secret (dev: kubectl; prod: ExternalSecret) — absent secretRef means
+    # the template accepts no landings (fail closed).
+    secretRef:
+      name: harmostes-template-webhook
+      key: secret
   scope:
   - name: fork
     kind: string
