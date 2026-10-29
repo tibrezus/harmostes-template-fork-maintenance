@@ -1,0 +1,10 @@
+# What THIS repo delivers to a cluster: the template CR, nothing else.
+# scripts/, checks/ (incl. testdata fixtures that are not K8s resources),
+# hooks/, skill/, forks/ are engine content consumed by CI and the worker
+# mounts — never applied. Without this file Flux generates a default
+# kustomization globbing every YAML in the tree (hit live: the gotest
+# fixture defs have no Resource metadata and fail the build).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - template.yaml
