@@ -65,38 +65,6 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/tibrezus/agents /tmp/agents
           HARMOSTES_TEMPLATE_DIR="$GITHUB_WORKSPACE" bash /tmp/agents/skills/fork-maintenance/scripts/check-drift.sh
-
-  payload-lockstep:
-    # Three-tier transition guard: the chart still carries the engine copies
-    # (until phase-4 decommission) and deployments run either writer — the two
-    # copies must stay byte-identical until then. Phase 4 deletes the chart
-    # copy AND this job together.
-    runs-on: ubuntu-latest
-    needs: engine-contracts
-    steps:
-      - uses: actions/checkout@v4
-      - name: checkout the kernel at the pinned tag
-        uses: actions/checkout@v4
-        with:
-          repository: tibrezus/harmostes
-          ref: v1.9.2
-          path: kernel
-      - name: engine payload matches the chart's transition copy
-        run: |
-          set -euo pipefail
-          fail=0
-          for f in scripts/*.sh scripts/*.py checks/validate-fork.sh checks/gate-resolved.sh hooks/*.sh skill/SKILL.md skill/references/*.md; do
-            case "$f" in scripts/tests/*) continue;; esac
-            theirs="kernel/chart/fork-maintenance/$f"
-            if [ ! -f "$theirs" ]; then
-              echo "::error::NO CHART COUNTERPART: $f exists here but kernel/chart/fork-maintenance/$f does not — if phase 4 already deleted the chart copy, delete this job too" ; fail=1; continue
-            fi
-            if ! diff -q "$f" "$theirs" >/dev/null; then
-              echo "::error::DRIFT: $f differs from the chart's transition copy — keep both in lockstep until phase 4 (or the deployments' two writers diverge)" ; fail=1
-            fi
-          done
-          [ "$fail" = 0 ] && echo "payload lockstep: repo == chart transition copy ✓"
-
   cr-conformance:
     runs-on: ubuntu-latest
     steps:
