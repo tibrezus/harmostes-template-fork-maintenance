@@ -8,7 +8,7 @@ kind: WorkflowTemplate
 metadata:
   name: fork-maintenance
 spec:
-  description: Fork maintenance (fork-sync → noop → noop)
+  description: Fork maintenance (fork-sync → noop → noop) — repo-carried, three-tier 3a
   source:
     forge: github
     repo: tibrezus/harmostes-template-fork-maintenance
