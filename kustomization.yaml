@@ -1,10 +1,44 @@
-# What THIS repo delivers to a cluster: the template CR, nothing else.
-# scripts/, checks/ (incl. testdata fixtures that are not K8s resources),
-# hooks/, skill/, forks/ are engine content consumed by CI and the worker
-# mounts — never applied. Without this file Flux generates a default
-# kustomization globbing every YAML in the tree (hit live: the gotest
-# fixture defs have no Resource metadata and fail the build).
+# What THIS repo delivers to a cluster:
+#   - the template CR (template.yaml)
+#   - the engine payload ConfigMaps (three-tier 3a stage 3): scripts/checks/
+#     hooks/skill — CODE, delivered under the SAME names the chart's mounts
+#     consume (forkMaintenance.*ConfigMap values), so a deployment running
+#     forkMaintenance.payload=external mounts repo-delivered bytes.
+#     fork-maintenance-defs is NOT here: defs are per-env DATA (config tier,
+#     tibrezus/harmostes-config overlays).
+# Explicit file lists, never globs: scripts/tests and checks/testdata are
+# CI fixtures, not engine payload.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - template.yaml
+generatorOptions:
+  disableNameSuffixHash: true   # the pool mounts STATIC names (values-configured)
+configMapGenerator:
+  - name: fork-maintenance-scripts
+    files:
+      - scripts/sync-fork.sh
+      - scripts/mapping-mode.sh
+      - scripts/conflict-event.sh
+      - scripts/derive-release-version.sh
+      - scripts/backport.sh
+      - scripts/git-host.sh
+      - scripts/resolve-conflict.sh
+      - scripts/conflict-subscriber.py
+      - scripts/generate-manifest.sh
+      - scripts/verify-patches.sh
+      - scripts/divergence-track.sh
+  - name: fork-maintenance-checks
+    files:
+      - checks/validate-fork.sh
+      - checks/gate-resolved.sh
+  - name: fork-maintenance-hooks
+    files:
+      - hooks/dapr.sh
+      - hooks/signoz.sh
+  - name: fork-maintenance-skill
+    files:
+      - SKILL.md=skill/SKILL.md
+      - conflict-resolution.md=skill/references/conflict-resolution.md
+      - safeguards.md=skill/references/safeguards.md
+      - architecture.md=skill/references/architecture.md
