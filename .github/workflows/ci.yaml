@@ -52,6 +52,20 @@ jobs:
           fi
           echo "go_test gate fixture: blocked broken behavior, passed green, errored on bad def ✓"
 
+  skill-drift:
+    runs-on: ubuntu-latest
+    needs: engine-contracts
+    steps:
+      - uses: actions/checkout@v4
+      - name: the agents repo's verbatim skill copy matches THIS repo (#606 retarget)
+        # The template repo is CANONICAL (three-tier 3a); the agents repo's
+        # skills/fork-maintenance/templates/ are verbatim copies an agent
+        # loads. This job is the drift ALARM: an engine edit here without
+        # the matching agents-repo sync fails THIS repo's CI.
+        run: |
+          git clone --depth 1 https://github.com/tibrezus/agents /tmp/agents
+          HARMOSTES_TEMPLATE_DIR="$GITHUB_WORKSPACE" bash /tmp/agents/skills/fork-maintenance/scripts/check-drift.sh
+
   cr-conformance:
     runs-on: ubuntu-latest
     steps:
