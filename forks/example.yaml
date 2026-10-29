@@ -1,30 +1,13 @@
-# ANNOTATED EXAMPLE — not a live fork def. The shape contract for
-# forks/<name>.yaml; the live defs are data in harmostes-config.
+# ANNOTATED EXAMPLE — shape documentation, NOT executed by CI (a go_test
+# declaration runs against real modules; the ACCEPT path is the fixture
+# proof in engine-contracts, which uses the real fixture defs).
 #
-# A def has three sections: identity (where the fork lives), sync (what
-# moves), validation (what must hold after the merge lands).
+# A def declares the fork's validation contract; go_test packages are
+# EXPLICIT (./... is the forbidden silent fallback, #564).
 
-# Identity: the fork this def drives.
-fork: example-project          # the fork's short name (= this file's stem)
-upstream: https://github.com/example/example   # clone URL (upstream)
-origin: https://github.com/rezuscloud/example  # the fork we maintain
-release_branch: main           # the branch that must always be functional
-
-# Sync: what the engine moves and how.
-sync:
-  branch_prefix: vendor        # conflict branches: vendor/<slug>
-  conflict_mode: escalate      # escalate | auto (escalate = PR, never force)
-  mode: mapping                # mapping | subtree (how the upstream tree maps)
-  mapping:                     # mode: mapping — upstream path → fork path
-    - from: .
-      to: .
-
-# Validation (all optional; a def with no validation: block passes):
+name: example                        # = this file's stem
 validation:
-  go_build:
-    go: "1.24"
-    packages: [./cmd/community]
   go_test:
-    go: "1.24"
-    packages: [./...]          # must be EXPLICIT — no silent ./...
-    timeout: 20m
+    - module: .                      # the Go module to run in
+      packages: [./okpkg, ./badpkg]  # EXPLICIT list, never ./...
+      timeout: 60s

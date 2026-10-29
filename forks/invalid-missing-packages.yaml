@@ -1,16 +1,8 @@
-# A deliberately INVALID def (the hard-error case, #564): go_test without
-# packages must be a hard error, never a silent ./. The CI asserts the
-# validator rejects this file.
-fork: invalid-example
-upstream: https://github.com/example/example
-origin: https://github.com/rezuscloud/example
-release_branch: main
-sync:
-  conflict_mode: escalate
-  mode: mapping
-  mapping:
-    - from: .
-      to: .
+# A deliberately INVALID def (the hard-error case, #564): go_test entries
+# without explicit packages must be a hard error, never a silent ./...
+# The CI asserts the validator rejects this def.
+name: invalid-example
 validation:
   go_test:
-    go: "1.24"
+    - module: .
+      timeout: 60s

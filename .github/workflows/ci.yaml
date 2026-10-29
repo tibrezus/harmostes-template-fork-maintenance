@@ -83,18 +83,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: the validator accepts the annotated example, rejects the invalid def
+      - name: the validator hard-rejects a def whose go_test omits packages
+        # (the ACCEPT path is the fixture proof in engine-contracts — it runs
+        # the REAL fixture defs, packages included, against real modules.)
         run: |
           set -euo pipefail
           TMP=$(mktemp -d)
           mkdir -p "$TMP/checks" "$TMP/forks" "$TMP/work"
           cp checks/validate-fork.sh "$TMP/checks/"
-          cp forks/example.yaml "$TMP/forks/"
-          # a workdir with no validation-bearing changes passes trivially
-          bash "$TMP/checks/validate-fork.sh" example "$TMP/work" >/dev/null 2>&1 \
-            || { echo "::error::the annotated example def must validate"; exit 1; }
           cp forks/invalid-missing-packages.yaml "$TMP/forks/invalid-example.yaml"
           if bash "$TMP/checks/validate-fork.sh" invalid-example "$TMP/work" >/dev/null 2>&1; then
             echo "::error::go_test without packages must be a HARD error"; exit 1
           fi
-          echo "def schema: example accepted, invalid def rejected ✓"
+          echo "def schema: invalid def rejected ✓"
