@@ -1,0 +1,4 @@
+# Pins the absent-check path: `validation: {}` must exit 0 with NO error
+# (ry's `// [] | length` must yield 0, never null hitting the -gt compare).
+name: empty
+validation: {}

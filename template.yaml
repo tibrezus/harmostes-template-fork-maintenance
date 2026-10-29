@@ -1,0 +1,35 @@
+# The fork-maintenance WorkflowTemplate — this repo IS the template's home
+# (three-tier phase 3a, ADR-0011 amendment): the pipeline shape, the engine
+# (scripts/), the checks, the hooks, and the skill live here, versioned by
+# git. The CR carries spec.source (#787): the MR-bridge proposes edits
+# against THIS file, and signed pushes to main land as revision identity.
+apiVersion: harmostes.dev/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: fork-maintenance
+spec:
+  description: Fork maintenance (fork-sync → noop → noop)
+  source:
+    forge: github
+    repo: tibrezus/harmostes-template-fork-maintenance
+    path: template.yaml
+    branch: main
+  scope:
+  - name: fork
+    kind: string
+    label: Fork
+    description: fork-maintenance registry name (forks/<name>.yaml)
+  prepare:
+    plugin:
+      name: fork-sync
+  agent:
+    enabled: false
+    model: none
+    taskTemplate:
+      name: none
+    gate:
+      plugin:
+        name: noop
+  deploy:
+    plugin:
+      name: noop

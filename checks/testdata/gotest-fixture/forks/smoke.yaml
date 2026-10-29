@@ -1,0 +1,8 @@
+# Fixture def (NOT rendered — ConfigMaps only embed listed files): one good
+# and one watched package. CI flips bad.Bad() to prove the gate blocks.
+name: smoke
+validation:
+  go_test:
+    - module: .
+      packages: [./okpkg, ./badpkg]
+      timeout: 60s

@@ -1,0 +1,6 @@
+# Pins the forgotten-packages path: a go_test entry without packages must be
+# a hard visible error (exit 1), never a silent ./... over upstream's suite.
+name: nopackages
+validation:
+  go_test:
+    - module: .

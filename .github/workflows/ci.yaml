@@ -1,0 +1,100 @@
+# The template repo's gates: the same suites the kernel ran while the engine
+# lived in the chart, plus the fixture proof and the CR conformance gate.
+# The copies (chart, agents) drift-check AGAINST this repo — canonical (#606
+# retarget).
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  # The pinned kernel chart whose CRDs define conformance (one line to bump).
+  KERNEL_CHART: "1.9.1"
+
+jobs:
+  engine-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: release identity + conflict contract (verbatim suites)
+        run: |
+          bash scripts/tests/derive-release-version.test.sh
+          bash scripts/tests/conflict-contract.test.sh
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: go_test gate fixture (behavioral proof, #564 — four assertions)
+        # 1: absent validation block → exit 0 (no checks declared, no error)
+        # 2: broken behavior (mutation) → exit 1 — the gate BLOCKS
+        # 3: behavior restored → exit 0 — the gate passes on green
+        # 4: forgotten packages key → exit 1 — hard error, never silent ./...
+        run: |
+          set -euo pipefail
+          FIXTURE=checks/testdata/gotest-fixture
+          TMP=$(mktemp -d)
+          # MUST mirror the deployed layout: <MAINT_DIR>/checks/validate-fork.sh
+          mkdir -p "$TMP/checks"
+          cp checks/validate-fork.sh "$TMP/checks/"
+          cp -r "$FIXTURE/forks" "$FIXTURE/work" "$TMP/"
+          bash "$TMP/checks/validate-fork.sh" empty "$TMP/work" >/dev/null 2>&1 \
+            || { echo "::error::empty validation block must exit 0"; exit 1; }
+          sed -i 's/return 2/return 3/' "$TMP/work/badpkg/bad.go"
+          if bash "$TMP/checks/validate-fork.sh" smoke "$TMP/work" >/dev/null 2>&1; then
+            echo "::error::go_test gate did NOT block broken behavior (mutation survived)"; exit 1
+          fi
+          sed -i 's/return 3/return 2/' "$TMP/work/badpkg/bad.go"
+          bash "$TMP/checks/validate-fork.sh" smoke "$TMP/work" >/dev/null 2>&1 \
+            || { echo "::error::go_test gate failed on green behavior"; exit 1; }
+          if bash "$TMP/checks/validate-fork.sh" nopackages "$TMP/work" >/dev/null 2>&1; then
+            echo "::error::missing packages must be a hard error, not a silent ./..."; exit 1
+          fi
+          echo "go_test gate fixture: blocked broken behavior, passed green, errored on bad def ✓"
+
+  cr-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: checkout the kernel at the pinned tag (public repo; chart/crds is single-sourced)
+        uses: actions/checkout@v4
+        with:
+          repository: tibrezus/harmostes
+          ref: v${{ env.KERNEL_CHART }}
+          path: kernel
+      - name: locate the CRDs
+        run: ls kernel/chart/crds/
+      - name: conformance (the config tier's harness, vendored)
+        run: |
+          mkdir -p /usr/local/kubebuilder/bin
+          sudo mkdir -p /usr/local/kubebuilder/bin && sudo chown -R "$USER" /usr/local/kubebuilder
+          curl -sL --retry 5 --retry-all-errors "https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v1.31.0/envtest-v1.31.0-linux-amd64.tar.gz" | tar -xz -C /tmp
+          mv /tmp/controller-tools/envtest/* /usr/local/kubebuilder/bin/
+          # the harness is shared with harmostes-config — clone it at its pin
+          git clone --depth 1 https://github.com/tibrezus/harmostes-config /tmp/config
+          cd /tmp/config && go mod download 2>/dev/null || true
+          go run ./hack/conformance.go -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE"
+
+  def-schema:
+    runs-on: ubuntu-latest
+    needs: engine-contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: the validator accepts the annotated example, rejects the invalid def
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          mkdir -p "$TMP/checks" "$TMP/forks" "$TMP/work"
+          cp checks/validate-fork.sh "$TMP/checks/"
+          cp forks/example.yaml "$TMP/forks/"
+          # a workdir with no validation-bearing changes passes trivially
+          bash "$TMP/checks/validate-fork.sh" example "$TMP/work" >/dev/null 2>&1 \
+            || { echo "::error::the annotated example def must validate"; exit 1; }
+          cp forks/invalid-missing-packages.yaml "$TMP/forks/invalid-example.yaml"
+          if bash "$TMP/checks/validate-fork.sh" invalid-example "$TMP/work" >/dev/null 2>&1; then
+            echo "::error::go_test without packages must be a HARD error"; exit 1
+          fi
+          echo "def schema: example accepted, invalid def rejected ✓"

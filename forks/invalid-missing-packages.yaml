@@ -1,0 +1,16 @@
+# A deliberately INVALID def (the hard-error case, #564): go_test without
+# packages must be a hard error, never a silent ./. The CI asserts the
+# validator rejects this file.
+fork: invalid-example
+upstream: https://github.com/example/example
+origin: https://github.com/rezuscloud/example
+release_branch: main
+sync:
+  conflict_mode: escalate
+  mode: mapping
+  mapping:
+    - from: .
+      to: .
+validation:
+  go_test:
+    go: "1.24"
