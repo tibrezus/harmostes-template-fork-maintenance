@@ -179,6 +179,39 @@ Adding a language/ecosystem = adding a check type (`cargo_build`, `cmake_build`,
 
 No change to `sync-fork.sh`, `git-host.sh`, or `validate-fork.sh`. No change to the fork repo (beyond its existing patches + one `release.yml`).
 
+## Groups: one def, a whole organization (kind: group)
+
+A **group def** (`kind: group`) maintains a whole org of forks with ONE def + ONE workflow instance. The mapping table gains a header row: discovery replaces enumeration.
+
+```yaml
+name: rezusforks
+kind: group
+
+group:
+  platform: github
+  org: rezusforks            # every FORK repo in the org is a target
+  exclude: [external-dns]    # bare repo names; XOR include
+  upstream_map:              # for DETACHED forks (GitHub nulls .parent)
+    cilium: {url: "https://github.com/cilium/cilium", branch: main}
+
+defaults:                    # inherited ONLY by members without their own def
+  fork: {platform: github, token_env: GITHUB_TOKEN}
+  versioning: {tag_pattern: "v*-rezus.*"}
+  auto: {merge: false, release: false}
+```
+
+Per member, composition is **own def file > synthesis** (discovery + `upstream_map` + `defaults`):
+
+1. `forks/<member>.yaml` exists → it runs byte-identically to a standalone fork (dapr/signoz under `rezusforks`).
+2. No file → synthesized: upstream from `upstream_map` (or the host's fork parent), `fork.url` from discovery, release branch `rezus/<upstream-default>` by convention, everything else from `defaults`.
+3. No def, no map, detached parent → **SKIPPED loudly**, never guessed.
+
+A member whose release branch doesn't exist yet (a bare fork) is **bootstrapped**: `rezus/<default>` is seeded from the fork's current default — for a fresh fork that IS upstream's snapshot, so the invariant holds trivially and the first real sync arrives as an ordinary catch-up PR.
+
+Run semantics: each member runs the FULL single-fork flow as an isolated child — one member's conflict never blocks the others. Exit code = worst member outcome (0 all fine, 2 any conflict → resolver handles async, 3 any push failure, 1 ALL members failed; skips don't rescue a dead group). The final stdout line is one aggregate PluginResult with a `members[]` array.
+
+Engine seam: the dispatcher hands synthesized defs to the per-member child via `HARMOSTES_FORK_DEF` (the defs mount is a read-only ConfigMap — synthesized defs can never be written where real defs live). The validator (`validate-fork.sh`) carries the group schema: org required, exclude XOR include, bare names, single-fork keys forbidden at group level.
+
 ## Automation model
 
 - **Trigger**: Flux `GitRepository` polls upstream (event-driven artifact update); a `*/N m` CronJob is the executor; an `Alert` can trigger an immediate sync on upstream change. Either way, sync is automatic and regular.

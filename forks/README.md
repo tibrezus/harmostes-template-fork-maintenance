@@ -7,3 +7,8 @@ configuration — it belongs to the config tier (`tibrezus/harmostes-config`,
 per-environment overlays), delivered to the cluster as the fork-defs
 ConfigMap. This directory carries the shape contract: an annotated example
 (CI: the validator accepts it) and an invalid def (CI: hard-rejected).
+
+A def may also be `kind: group` — maintain a whole org with ONE def
+(discovery + exclude/include + defaults; per-member defs compose over
+the defaults). Schema: `checks/validate-fork.sh`; docs:
+`skill/references/architecture.md` § Groups.

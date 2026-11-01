@@ -51,6 +51,52 @@ fi
 # yq reader with a null-safe default
 ry() { yq -r "$1" "$DEF_FILE" 2>/dev/null; }
 
+# ── Schema validation for GROUP defs (kind: group) ───────────────────────────
+# A group def is DISCOVERY + DEFAULTS data, never a single fork's sync spec.
+# The single-fork schema below is unreachable for groups — groups run per-
+# member validation against each member's OWN (or synthesized) def.
+DEF_KIND=$(ry '.kind // "project"')
+if [ "$DEF_KIND" = "group" ]; then
+  GROUP_FAIL=""
+  gcheck() { [ -n "$2" ] || GROUP_FAIL="$GROUP_FAIL\n  - $1"; }
+  gcheck "group.org is required" "$(ry '.group.org // ""')"
+  gp=$(ry '.group.platform // "github"')
+  case "$gp" in github|forgejo) ;; *) GROUP_FAIL="$GROUP_FAIL\n  - group.platform must be github|forgejo (got '$gp')" ;; esac
+  if [ "$gp" = "forgejo" ]; then gcheck "group.api_url is required for forgejo groups" "$(ry '.group.api_url // ""')"; fi
+  ginc=$(ry '.group.include // [] | length')
+  gexc=$(ry '.group.exclude // [] | length')
+  if [ "${ginc:-0}" -gt 0 ] && [ "${gexc:-0}" -gt 0 ]; then
+    GROUP_FAIL="$GROUP_FAIL\n  - group.include and group.exclude are mutually exclusive"
+  fi
+  # entries are bare repo names — no org/ prefixes, no globs
+  for key in include exclude; do
+    n=$(ry ".group.$key // [] | length")
+    for ((i=0; i<n; i++)); do
+      e=$(ry ".group.$key[$i] // \"\"")
+      case "$e" in */*) GROUP_FAIL="$GROUP_FAIL\n  - group.$key entries are bare repo names (got '$e')" ;; esac
+    done
+  done
+  # upstream_map entries: name → {url, branch}, both non-empty
+  umn=$(ry '.group.upstream_map // {} | keys | length')
+  for ((i=0; i<umn; i++)); do
+    k=$(ry ".group.upstream_map // {} | keys | .[$i]")
+    gcheck "group.upstream_map.$k.url required" "$(ry ".group.upstream_map.\"$k\".url // \"\"")"
+    gcheck "group.upstream_map.$k.branch required" "$(ry ".group.upstream_map.\"$k\".branch // \"\"")"
+  done
+  # Single-fork sync keys are meaningless at group level — they silently
+  # would do nothing (patches/release of WHAT?). defaults carries the
+  # inheritable block; everything per-member lives in member def files.
+  for bad in upstream fork versioning patches additive_paths deletions post_merge_hook release validation mappings mode; do
+    [ "$(ry ".${bad} // \"\"" | head -c 1)" = "" ] || GROUP_FAIL="$GROUP_FAIL\n  - '$bad:' is a single-fork key — groups carry group:/defaults: (member defs own the rest)"
+  done
+  if [ -n "$GROUP_FAIL" ]; then
+    printf '%b\n' "ERROR: invalid group def '$FORK_NAME':$GROUP_FAIL" >&2
+    exit 1
+  fi
+  echo "group def '$FORK_NAME' schema: ✓ (org=$(ry '.group.org'), platform=$gp)"
+  exit 0
+fi
+
 RESULTS_FILE=$(mktemp)
 trap "rm -f $RESULTS_FILE" EXIT
 

@@ -1,0 +1,20 @@
+name: g-ok
+kind: group
+group:
+  platform: github
+  org: rezusforks
+  exclude:
+    - external-dns
+  upstream_map:
+    cilium:
+      url: https://github.com/cilium/cilium
+      branch: main
+defaults:
+  fork:
+    platform: github
+    token_env: GITHUB_TOKEN
+  versioning:
+    tag_pattern: "v*-rezus.*"
+  auto:
+    merge: false
+    release: false

@@ -17,10 +17,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # PIN the yq flavor to PRODUCTION (the worker image apt-installs
+      # Debian's yq = mikefarah v4; the runner's preinstalled yq differs and
+      # degraded a group-def parse in CI — 2026-11-01). One line to bump.
+      - run: |
+          curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          yq --version
       - name: release identity + conflict contract (verbatim suites)
         run: |
           bash scripts/tests/derive-release-version.test.sh
           bash scripts/tests/conflict-contract.test.sh
+          bash scripts/tests/group-defs.test.sh
+      - name: group-def schema gate (validator accepts the shape, rejects the broken ones)
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          mkdir -p "$TMP/checks" "$TMP/forks"
+          cp checks/validate-fork.sh "$TMP/checks/"
+          cp checks/testdata/group/ok.yaml "$TMP/forks/g-ok.yaml"
+          cp checks/testdata/group/bad-both.yaml "$TMP/forks/g-bad.yaml"
+          bash "$TMP/checks/validate-fork.sh" g-ok "$TMP" > /dev/null
+          if bash "$TMP/checks/validate-fork.sh" g-bad "$TMP" 2>/dev/null; then
+            echo "::error::group def with include+exclude must be REJECTED"; exit 1
+          fi
+          echo "group schema: accepted ok.yaml, rejected bad-both.yaml ✓"
 
       - uses: actions/setup-go@v5
         with:
@@ -62,8 +83,16 @@ jobs:
         # skills/fork-maintenance/templates/ are verbatim copies an agent
         # loads. This job is the drift ALARM: an engine edit here without
         # the matching agents-repo sync fails THIS repo's CI.
+        # agents went PRIVATE (2026-10-29) and GitHub abuse-throttles this
+        # PAT's git ops from runner IPs — so the copy arrives via the REST
+        # tarball (api.github.com is a separate bucket; the freshness
+        # workflow proved it), never via a git clone.
+        env:
+          GH_TOKEN: ${{ secrets.HARMOSTES_GITHUB_TOKEN }}
         run: |
-          git clone --depth 1 https://github.com/tibrezus/agents /tmp/agents
+          gh api repos/tibrezus/agents/tarball/main > /tmp/agents.tar.gz
+          mkdir -p /tmp/agents
+          tar -xzf /tmp/agents.tar.gz -C /tmp/agents --strip-components=1
           HARMOSTES_TEMPLATE_DIR="$GITHUB_WORKSPACE" bash /tmp/agents/skills/fork-maintenance/scripts/check-drift.sh
   cr-conformance:
     runs-on: ubuntu-latest

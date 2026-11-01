@@ -1,0 +1,7 @@
+name: g-bad
+kind: group
+group:
+  platform: github
+  org: rezusforks
+  exclude: [external-dns]
+  include: [dapr]

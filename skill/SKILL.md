@@ -46,6 +46,13 @@ of the old ours + green proof), edit, delete. The registry defs in
   Engine politely declines mapping defs (`sync-fork.sh forgejo` → exit 0).
 - **dapr / signoz**: plugin transport (phase mode below).
 
+**Groups (`kind: group`)**: the table can also carry a header row — one
+group def maintains a whole ORG of forks (discovery + exclusions +
+defaults; per-member defs still win). See
+[architecture.md § Groups](references/architecture.md#groups-one-def-a-whole-organization-kind-group).
+One workflow instance runs the org; per-member outcomes aggregate into
+one PluginResult with a `members[]` array.
+
 ## Version identity (upstream-identity versioning)
 
 **The fork mints no version of its own. Identity is the upstream version; everything else is provenance.**

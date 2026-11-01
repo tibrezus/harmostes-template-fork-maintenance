@@ -50,7 +50,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # MAINT_DIR is the parent of scripts/ — either platform/harmostes/fork-maintenance/ in the
 # repo, or /workspace/ in the worker (ConfigMap mount).
 MAINT_DIR="$(dirname "$SCRIPT_DIR")"
-DEF_FILE="$MAINT_DIR/forks/${FORK_NAME}.yaml"
+# HARMOSTES_FORK_DEF: def-file override. The group dispatcher (below) synthesizes
+# defs for org members that have no file of their own (group defaults + discovery)
+# and hands them to the per-member child process through this env var — the
+# fork-maintenance-defs mount is a read-only ConfigMap, so synthesized defs can
+# never be written where real defs live. Real defs always win over synthesis.
+DEF_FILE="${HARMOSTES_FORK_DEF:-$MAINT_DIR/forks/${FORK_NAME}.yaml}"
 
 if [ ! -f "$DEF_FILE" ]; then
   echo "ERROR: fork definition not found: $DEF_FILE" >&2
@@ -81,6 +86,256 @@ if [ "$(read_yaml '.mappings | length' 2>/dev/null || echo 0)" != "0" ] && [ "$M
   echo "sync runs in the fork repo: .github/workflows/sync.yml — nothing to do here"
   exit 0
 fi
+
+# Per-member child invocation. Test seam: HARMOSTES_SYNC_CHILD overrides the
+# command (the group-defs suite stubs members to assert discovery, exclusion,
+# composition, and outcome aggregation without cloning anything).
+run_group_member() {
+  local member="$1" phase="$2" def_file="$3"
+  if [ -n "${HARMOSTES_SYNC_CHILD:-}" ]; then
+    # test seam: the %MEMBER% stub runs with the SAME env contract as the
+    # real child (HARMOSTES_FORK_DEF carries the resolved def).
+    HARMOSTES_FORK_DEF="$def_file" eval "${HARMOSTES_SYNC_CHILD//%MEMBER%/$member}"
+  else
+    HARMOSTES_FORK_DEF="$def_file" bash "$SCRIPT_DIR/sync-fork.sh" "$member" "$phase"
+  fi
+}
+
+# Member-def resolution: own def file > synthesis (defaults + discovery).
+# Echoes the def file path; writes synthesized defs to a temp file the child
+# reads via HARMOSTES_FORK_DEF. Echoes "SKIP:<reason>" when undef'd+unmapped.
+resolve_member_def() {
+  local member="$1" org="$2"
+  local own="$MAINT_DIR/forks/${member}.yaml"
+  if [ -f "$own" ]; then
+    echo "$own"
+    return 0
+  fi
+  # Discover the upstream: explicit upstream_map entry first (detached forks
+  # have a null parent — the API cannot answer), then the host's fork parent.
+  local u_url u_branch
+  u_url=$(read_yaml ".group.upstream_map.\"${member}\".url // .group.upstream_map.${member}.url // \"\"" 2>/dev/null || echo "")
+  u_branch=$(read_yaml ".group.upstream_map.\"${member}\".branch // .group.upstream_map.${member}.branch // \"\"" 2>/dev/null || echo "")
+  if [ -z "$u_url" ]; then
+    local parent
+    parent=$(host_repo_parent "$org/$member") || parent=""   # "<url> <default-branch>" or empty
+    if [ -n "$parent" ]; then
+      u_url=$(printf '%s' "$parent" | awk '{print $1}')
+      u_branch=$(printf '%s' "$parent" | awk '{print $2}')
+    fi
+  fi
+  if [ -z "$u_url" ] || [ -z "$u_branch" ]; then
+    echo "SKIP:no upstream — no member def, no upstream_map entry, host parent detached/absent"
+    return 1
+  fi
+  # Compose the def in ONE python pass (the worker image ships pyyaml):
+  # discovery facts + upstream + group defaults, with the fork block merged
+  # (defaults' fork.url/default_branch never shadow the synthesized ones —
+  # a duplicate YAML key would silently drop them to the last writer).
+  # NOTE: resolve_member_def runs under command substitution — the synthesis
+  # must write the FILE, never stdout (stdout IS the return channel: the
+  # def path, or SKIP:<reason>).
+  local tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fork-def-${member}.XXXXXX.yaml")
+  SYNTH_OUT="$tmp" FORK_NAME="$FORK_NAME" MEMBER="$member" GROUP_FORK_BASE="$(group_fork_base)" ORG="$org" \
+    UPSTREAM_URL="$u_url" UPSTREAM_BRANCH="$u_branch" DEF_FILE="$DEF_FILE" \
+    python3 <<'PYEOF' || return 1
+import os, sys, yaml
+with open(os.environ["DEF_FILE"]) as f:
+    d = yaml.safe_load(f) or {}
+defaults = d.get("defaults") or {}
+fork_defaults = defaults.pop("fork", {}) or {}
+fork_defaults["url"] = f"{os.environ['GROUP_FORK_BASE']}/{os.environ['ORG']}/{os.environ['MEMBER']}"
+fork_defaults["default_branch"] = f"rezus/{os.environ['UPSTREAM_BRANCH']}"
+out = {
+    "name": os.environ["MEMBER"],
+    "upstream": {"url": os.environ["UPSTREAM_URL"], "branch": os.environ["UPSTREAM_BRANCH"]},
+    "fork": fork_defaults,
+}
+for key in ("versioning", "auto", "validation"):
+    if key in defaults:
+        out[key] = defaults[key]
+with open(os.environ["SYNTH_OUT"], "w") as f:
+    f.write(
+        f"# SYNTHESIZED by the group dispatcher (group '{os.environ['FORK_NAME']}') — do not edit;\n"
+        f"# add forks/{os.environ['MEMBER']}.yaml to take over this member with a real def.\n"
+    )
+    f.write(yaml.safe_dump(out, default_flow_style=False, sort_keys=True))
+PYEOF
+  echo "$tmp"
+}
+
+# The base URL for member fork repos (scheme + host), derived from
+# group.fork_base (explicit) or the platform default.
+group_fork_base() {
+  local b
+  b=$(read_yaml '.group.fork_base // ""' 2>/dev/null || echo "")
+  case "${b:-x}" in
+    x) case "$(read_yaml '.group.platform // "github"')" in forgejo) echo "https://git.rezus.cloud" ;; *) echo "https://github.com" ;; esac ;;
+    *) echo "$b" ;;
+  esac
+}
+
+run_group() {
+  local phase="${1:-all}"
+  local org platform
+  org=$(read_yaml '.group.org' 2>/dev/null || true)
+  platform=$(read_yaml '.group.platform // "github"')
+  if [ -z "$org" ]; then
+    echo "ERROR: group def '$FORK_NAME' requires group.org" >&2
+    exit 1
+  fi
+  # Forgejo enumeration needs the REST base (host_setup sets it per-fork; the
+  # group dispatcher sets it from the group block).
+  if [ "$platform" = "forgejo" ]; then
+    FORGEJO_API=$(read_yaml '.group.api_url // .fork.api_url // ""')
+    [ -n "$FORGEJO_API" ] || { echo "ERROR: forgejo group def requires group.api_url" >&2; exit 1; }
+    export FORGEJO_API
+  fi
+
+  local discovered include exclude
+  mapfile -t discovered < <(host_list_org_forks "$org" | sort -u)
+  # Array iteration (.group.exclude[]), not bracket-stripping: both yq
+  # flavors (jq-wrapper and mikefarah) emit one item per line, while
+  # '[] // alt' renders [\"x\"] vs [x] depending on flavor — and a parse
+  # that degrades to empty makes grep -F "" match EVERY member (the whole
+  # org excluded — caught live in CI, 2026-11-01).
+  include=$(read_yaml '.group.include[]' 2>/dev/null || true)
+  exclude=$(read_yaml '.group.exclude[]' 2>/dev/null || true)
+
+  echo "=== [group] $FORK_NAME (org=$org, platform=$platform, phase=$phase) ==="
+  if [ "${#discovered[@]}" -eq 0 ]; then
+    echo "ERROR: no fork repos discovered in org '$org' — check the token/platform" >&2
+    exit 1
+  fi
+  echo "discovered (${#discovered[@]}): ${discovered[*]}"
+
+  local -a maintain=() excluded=() missing=()
+  local m
+  # empty-pattern guard: grep -F "" matches EVERYTHING — an exclude/include
+  # parse that degrades to empty must never silently flip membership
+  # (the CI caught this: bracket-stripping was flavor-fragile, the parse
+  # degraded to empty, and grep -F "" excluded the whole org).
+  if [ -n "$include" ]; then
+    [ -n "$exclude" ] && { echo "ERROR: group.include and group.exclude are mutually exclusive" >&2; exit 1; }
+    while IFS= read -r m; do
+      [ -z "$m" ] && continue
+      if printf '%s\n' "${discovered[@]}" | grep -qxF "$m"; then maintain+=("$m"); else missing+=("$m"); fi
+    done <<<"$include"
+    [ "${#missing[@]}" -gt 0 ] && echo "WARNING: include entries not discovered: ${missing[*]}" >&2
+    echo "included (def): ${include//$'\n'/ }"
+  else
+    if [ -z "$exclude" ]; then
+      maintain=("${discovered[@]}")   # nothing excluded — everything is maintained
+    else
+      for m in "${discovered[@]}"; do
+        if printf '%s\n' "$exclude" | grep -qxF "$m"; then excluded+=("$m"); else maintain+=("$m"); fi
+      done
+    fi
+    [ "${#excluded[@]}" -gt 0 ] && echo "excluded (def): ${excluded[*]}"
+  fi
+  if [ "${#maintain[@]}" -eq 0 ]; then
+    echo "ERROR: no members to maintain after filtering" >&2
+    exit 1
+  fi
+  echo "maintaining (${#maintain[@]}): ${maintain[*]}"
+
+  local -a members_json=()
+  local worst=0 changed_any=false n_ok=0 n_conflict=0 n_pushfail=0 n_failed=0 n_skipped=0
+  for m in "${maintain[@]}"; do
+    local def_file outcome="failed" detail=""
+    def_file=$(resolve_member_def "$m" "$org") || {
+      detail="${def_file#SKIP:}"   # resolve_member_def echoes the skip reason
+      echo "── member $m: SKIPPED ($detail)"
+      members_json+=("{\"name\":\"$m\",\"outcome\":\"skipped\",\"detail\":\"$detail\"}")
+      n_skipped=$((n_skipped+1))
+      continue
+    }
+    local out rc=0
+    # `|| rc=$?` — a failing child must NOT trip set -e (a plain assignment
+    # from a failing command substitution exits the whole run): per-member
+    # isolation IS the contract — capture the rc, keep going.
+    out=$(run_group_member "$m" "$phase" "$def_file" 2>&1) || rc=$?
+    printf '%s\n' "$out" | sed 's/^/    /'
+    case "$rc" in
+      0)
+        if grep -q "Already up to date" <<<"$out"; then
+          outcome="no-op"; n_ok=$((n_ok+1))
+        else
+          outcome="changed"; changed_any=true; n_ok=$((n_ok+1))
+        fi
+        ;;
+      2) outcome="conflict";   n_conflict=$((n_conflict+1)); [ "$worst" -lt 2 ] && worst=2 ;;
+      3) outcome="push-failed"; n_pushfail=$((n_pushfail+1)); [ "$worst" -lt 3 ] && worst=3 ;;
+      *) outcome="failed";     n_failed=$((n_failed+1)) ;;
+    esac
+    echo "── member $m: ${outcome^^}"
+    members_json+=("{\"name\":\"$m\",\"outcome\":\"$outcome\"}")
+  done
+
+  # ALL members that RAN hard-failed → the group is red (1); skips don't
+  # rescue a dead group (a skipped member is loud config debt, not health).
+  # Otherwise the worst member outcome surfaces (2 conflict → the resolver
+  # handles it async; 3 push failure) while the rest still landed.
+  local exit_rc=0
+  if [ "$n_failed" -gt 0 ] && [ $((n_ok + n_conflict + n_pushfail)) -eq 0 ]; then
+    exit_rc=1
+  else
+    exit_rc=$worst
+  fi
+
+  echo ""
+  echo "=== GROUP SUMMARY: $FORK_NAME — changed=$changed_any members=${#maintain[@]} ok=$n_ok conflict=$n_conflict push-fail=$n_pushfail failed=$n_failed skipped=$n_skipped ==="
+  local msg
+  msg="group $FORK_NAME: ${#maintain[@]} members — changed=$changed_any ok=$n_ok conflict=$n_conflict push-failed=$n_pushfail failed=$n_failed skipped=$n_skipped"
+  printf '{"changed":%s,"artifact":"fork-sync-%s","event":{"phase":"%s"},"message":"%s","members":[%s]}\n' \
+    "$changed_any" "$FORK_NAME" "$phase" "$(printf '%s' "$msg" | sed 's/"/\\"/g')" "$(IFS=,; echo "${members_json[*]}")"
+  exit "$exit_rc"
+}
+
+# ── GROUP MODE (kind: group — maintain an org/group of forks) ────────────────
+# A group def declares DISCOVERY + DEFAULTS, not a single fork:
+#
+#   name: rezusforks
+#   kind: group
+#   group:
+#     platform: github            # github | forgejo — where the org lives
+#     org: rezusforks             # the org whose FORK repos are maintained
+#     exclude: [external-dns]     # repo names (bare); XOR include
+#     include: [dapr, signoz]     # optional allowlist; entries not discovered warn
+#     upstream_map:               # optional: member → upstream (needed when the
+#       cilium:                   # fork is DETACHED — GitHub nulls .parent)
+#         url: https://github.com/cilium/cilium
+#         branch: main
+#   defaults:                     # inherited ONLY by members without their own
+#     fork:                       # def file (forks/<member>.yaml always wins)
+#       platform: github
+#       token_env: GITHUB_TOKEN
+#     versioning: {tag_pattern: "v*-rezus.*"}
+#     auto: {merge: false, release: false}
+#
+# Per member the engine runs the FULL single-fork flow as a child process
+# (sync-fork.sh <member>), isolated: one member's conflict/failure never
+# blocks the others. Member defs compose: own def file > upstream_map/parent
+# discovery + defaults. An undef'd member with no discoverable upstream is
+# SKIPPED loudly, never guessed. Exit code = worst member outcome (0 all
+# fine/no-op, 2 any conflict, 3 any push failure, 1 ALL members failed);
+# the final stdout line is one aggregate PluginResult with a members array.
+KIND="$(read_yaml '.kind // "project"' 2>/dev/null || echo project)"
+case "$KIND" in
+  project|group) ;;
+  *) echo "ERROR: unknown def kind '$KIND' for '$FORK_NAME' (project | group)" >&2; exit 1 ;;
+esac
+
+if [ "$KIND" = "group" ]; then
+  # shellcheck source=scripts/git-host.sh
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/git-host.sh"
+  run_group "$PHASE"
+  exit $?   # run_group always exits; explicit for readability
+fi
+
+# — everything below runs for kind: project (single-fork defs) —
 
 UPSTREAM_URL=$(read_yaml '.upstream.url')
 UPSTREAM_BRANCH=$(read_yaml '.upstream.branch')
@@ -184,6 +439,22 @@ phase_merge() {
   fi
 
   CURRENT_BRANCH=$(git branch --show-current)
+  # ── Release-branch bootstrap ────────────────────────────────────────────
+  # A def whose fork.default_branch does not exist on the fork yet (fresh
+  # org member — forks start bare, only upstream's snapshot on their own
+  # default). Seed the release branch from the fork's CURRENT default (the
+  # clone's HEAD): for a bare fork that HEAD IS upstream's snapshot, so the
+  # release line starts byte-identical to upstream — the release-branch
+  # invariant holds trivially, and the first real sync arrives as an
+  # ordinary upstream catch-up PR. Pushed immediately so later phases see
+  # the PR base. Push failure = exit 3 (the push-failure contract).
+  if ! git ls-remote --heads origin "$FORK_DEFAULT_BRANCH" 2>/dev/null | grep -q .; then
+    echo "=== BOOTSTRAP: release branch $FORK_DEFAULT_BRANCH absent on the fork — seeding from current default ($CURRENT_BRANCH) ==="
+    git checkout -b "$FORK_DEFAULT_BRANCH"
+    git push origin "$FORK_DEFAULT_BRANCH" \
+      || { echo "ERROR: bootstrap push of $FORK_DEFAULT_BRANCH failed" >&2; exit 3; }
+    echo "  seeded + pushed: $FORK_DEFAULT_BRANCH"
+  fi
   if [ "$CURRENT_BRANCH" != "$FORK_DEFAULT_BRANCH" ]; then
     git checkout "$FORK_DEFAULT_BRANCH" 2>/dev/null || git checkout -b "$FORK_DEFAULT_BRANCH" "origin/$FORK_DEFAULT_BRANCH"
   fi
