@@ -118,7 +118,7 @@ resolve_member_def() {
   u_branch=$(read_yaml ".group.upstream_map.\"${member}\".branch // .group.upstream_map.${member}.branch // \"\"" 2>/dev/null || echo "")
   if [ -z "$u_url" ]; then
     local parent
-    parent=$(host_repo_parent "$org/$member")   # "<url> <default-branch>" or empty
+    parent=$(host_repo_parent "$org/$member") || parent=""   # "<url> <default-branch>" or empty
     if [ -n "$parent" ]; then
       u_url=$(printf '%s' "$parent" | awk '{print $1}')
       u_branch=$(printf '%s' "$parent" | awk '{print $2}')

@@ -177,6 +177,7 @@ group:
   exclude: [cilium]   # → members: dapr (own def), orphan (nothing — the skip)
 EOF
 OUT2=$(DISPATCH_LOG="$WORK/dispatch2.log" HARMOSTES_SYNC_CHILD="$WORK/bin/stub-member %MEMBER%" PATH="$WORK/bin:$PATH" bash "$MAINT/scripts/sync-fork.sh" rezusforks2 all 2>&1); RC2=$?
+if [ "$RC2" != "0" ]; then echo "    [debug] rezusforks2 rc=$RC2 out:"; sed 's/^/    | /' <<<"$OUT2"; ls -la "$WORK" >&2; fi
 assert_contains "SKIPPED (no upstream" "$OUT2" "undef'd + unmapped member is SKIPPED, never guessed"
 grep -q "member orphan: SKIPPED" <<<"$OUT2" && ok "orphan: no def, no map, detached parent → skipped" || fail "orphan not skipped"
 grep -q "MEMBER-RUN: dapr" "$WORK/dispatch2.log" && ok "dapr still maintained via its own def while others skip" || fail "dapr should run (own def)"
