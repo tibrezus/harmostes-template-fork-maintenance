@@ -11,6 +11,7 @@ on:
 env:
   # The pinned kernel chart whose CRDs define conformance (one line to bump).
   KERNEL_CHART: "1.9.1"
+  CONFORMANCE_TAG: "v1.10.0" # the kernel release carrying tools/conformance (the CRD-owned harness)
 
 jobs:
   engine-contracts:
@@ -73,19 +74,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: tibrezus/harmostes
-          ref: v${{ env.KERNEL_CHART }}
+          ref: ${{ env.CONFORMANCE_TAG }}
           path: kernel
       - name: locate the CRDs
         run: ls kernel/chart/crds/
-      - name: conformance (the config tier's harness, vendored)
+      - name: conformance (the kernel-owned harness)
         run: |
           sudo mkdir -p /usr/local/kubebuilder/bin && sudo chown -R "$USER" /usr/local/kubebuilder
           curl -sL --retry 5 --retry-all-errors "https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v1.31.0/envtest-v1.31.0-linux-amd64.tar.gz" | tar -xz -C /tmp
           mv /tmp/controller-tools/envtest/* /usr/local/kubebuilder/bin/
-          # the harness is shared with harmostes-config — clone it at its pin
-          git clone --depth 1 https://github.com/tibrezus/harmostes-config /tmp/config
-          cd /tmp/config && go mod download 2>/dev/null || true
-          go run ./hack/conformance.go -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/kernel" && go run ./tools/conformance -crds chart/crds -objects "$GITHUB_WORKSPACE"
 
   def-schema:
     runs-on: ubuntu-latest
