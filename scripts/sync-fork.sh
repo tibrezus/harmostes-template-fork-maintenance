@@ -273,16 +273,18 @@ run_group() {
         ;;
       2) outcome="conflict";   n_conflict=$((n_conflict+1)); [ "$worst" -lt 2 ] && worst=2 ;;
       3) outcome="push-failed"; n_pushfail=$((n_pushfail+1)); [ "$worst" -lt 3 ] && worst=3 ;;
-      *) outcome="failed";     n_failed=$((n_failed+1)) ;;
+      *) outcome="failed";     n_failed=$((n_failed+1)); [ "$worst" -lt 1 ] && worst=1 ;;
     esac
     echo "── member $m: ${outcome^^}"
     members_json+=("{\"name\":\"$m\",\"outcome\":\"$outcome\"}")
   done
 
-  # ALL members that RAN hard-failed → the group is red (1); skips don't
-  # rescue a dead group (a skipped member is loud config debt, not health).
-  # Otherwise the worst member outcome surfaces (2 conflict → the resolver
-  # handles it async; 3 push failure) while the rest still landed.
+  # Exit contract: worst member outcome — a failed member turns the group
+  # red (1) so a broken member is never masked by its siblings' no-ops
+  # (live 2026-11-01: cilium failed at checkout, the group still exited 0
+  # and the OLD wrapper reported it as a clean no-op). Conflicts (2) route
+  # to the resolver async; push failures (3) outrank conflicts; ALL failed
+  # stays 1.
   local exit_rc=0
   if [ "$n_failed" -gt 0 ] && [ $((n_ok + n_conflict + n_pushfail)) -eq 0 ]; then
     exit_rc=1
@@ -423,8 +425,15 @@ phase_merge() {
 
   echo ""
   echo "=== Cloning fork (shallow) ==="
+  # --depth implies --single-branch: the clone carries only the fork's
+  # DEFAULT branch. Members whose release branch is NOT the fork default
+  # (bare forks post-bootstrap: default main, release rezus/main) would
+  # then have no origin/<release> ref and the checkout below would die
+  # (live: the rezusforks synthesis run, 2026-11-01). Fetch the release
+  # branch explicitly — cheap at depth — so the ref always exists.
   git clone --depth 100 "$FORK_URL" "$WORKDIR"
   cd "$WORKDIR"
+  git fetch --depth 100 origin "refs/heads/$FORK_DEFAULT_BRANCH:refs/remotes/origin/$FORK_DEFAULT_BRANCH" 2>/dev/null || true
   STATE_FILE="$WORKDIR/.git/harmostes-state.env"
 
   # shellcheck source=scripts/git-host.sh

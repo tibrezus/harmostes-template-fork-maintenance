@@ -245,6 +245,34 @@ git --git-dir="$FORK_PATH" rev-parse refs/heads/main > "$WORK/main.sha"
 assert_eq "$(cat "$WORK/seeded.sha")" "$(cat "$WORK/main.sha")" "seeded release branch == fork default (bare fork → upstream snapshot)"
 grep -q "BOOTSTRAP" <<<"$OUT5" && ok "bootstrap is loud" || fail "bootstrap not announced"
 
+# regression (2026-11-01 rezusforks synthesis run): the SECOND run clones
+# single-branch (--depth implies --single-branch → only the fork default's
+# ref) with rezus/main NOW EXISTING on the fork — the explicit release-branch
+# fetch must make the checkout work (the old code died: origin/rezus/main
+# "is not a commit")
+OUT6=$(HOME="$BS" bash "$BS/maint/scripts/sync-fork.sh" canary2 merge 2>&1); RC6=$?
+assert_eq "$RC6" "0" "second run (existing release branch, fresh shallow clone) completes"
+grep -q "Already up to date" <<<"$OUT6" && ok "second run is a clean no-op" || fail "second run should no-op (upstream unchanged)"
+
+# and the aggregation contract: a failed member turns the group red even
+# when siblings no-op
+cat > "$WORK/bin/stub-member3" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = "dapr" ] && exit 0      # sibling no-op
+echo boom; exit 7                # hard failure
+EOF
+chmod +x "$WORK/bin/stub-member3"
+cat > "$MAINT/forks/g-red.yaml" <<'EOF'
+name: g-red
+kind: group
+group:
+  platform: github
+  org: rezusforks
+  include: [dapr, signoz]
+EOF
+OUT7=$(HARMOSTES_SYNC_CHILD="$WORK/bin/stub-member3 %MEMBER%" PATH="$WORK/bin:$PATH" bash "$MAINT/scripts/sync-fork.sh" g-red all 2>&1); RC7=$?
+assert_eq "$RC7" "1" "a failed member masks nothing — group exits 1 despite a no-op sibling"
+
 echo ""
 echo "════════════════════════════════════"
 echo "group-defs: PASS=$PASS FAIL=$FAIL"
