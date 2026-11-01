@@ -10,7 +10,7 @@ on:
 
 env:
   # The pinned kernel chart whose CRDs define conformance (one line to bump).
-  KERNEL_CHART: "1.9.1"
+  KERNEL_CHART: "1.10.0"  # first tag carrying tools/conformance (the harness moved into the kernel, #832)
 
 jobs:
   engine-contracts:
