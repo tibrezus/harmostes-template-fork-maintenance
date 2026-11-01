@@ -256,6 +256,12 @@ run_group() {
     # from a failing command substitution exits the whole run): per-member
     # isolation IS the contract — capture the rc, keep going.
     out=$(run_group_member "$m" "$phase" "$def_file" 2>&1) || rc=$?
+    # Compact for the envelope: git's \r progress spinners (checkout
+    # percentages, remote compression counts) are 90% of a member's bytes
+    # and drowned the aggregate summary in the persisted envelope (1KB cap,
+    # live 2026-11-01) — strip the \r carriage-return class + blank lines,
+    # keep every real line.
+    out=$(printf '%s' "$out" | tr '\r' '\n' | grep -vE '^[[:space:]]*([0-9]+%|Updating files)' | grep -v '^[[:space:]]*$' || true)
     printf '%s\n' "$out" | sed 's/^/    /'
     case "$rc" in
       0)
