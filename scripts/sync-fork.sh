@@ -195,8 +195,13 @@ run_group() {
 
   local discovered include exclude
   mapfile -t discovered < <(host_list_org_forks "$org" | sort -u)
-  include=$(read_yaml '.group.include // []' 2>/dev/null | sed 's/[][]//g' | tr -d '"' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)
-  exclude=$(read_yaml '.group.exclude // []' 2>/dev/null | sed 's/[][]//g' | tr -d '"' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)
+  # Array iteration (.group.exclude[]), not bracket-stripping: both yq
+  # flavors (jq-wrapper and mikefarah) emit one item per line, while
+  # '[] // alt' renders [\"x\"] vs [x] depending on flavor — and a parse
+  # that degrades to empty makes grep -F "" match EVERY member (the whole
+  # org excluded — caught live in CI, 2026-11-01).
+  include=$(read_yaml '.group.include[]' 2>/dev/null || true)
+  exclude=$(read_yaml '.group.exclude[]' 2>/dev/null || true)
 
   echo "=== [group] $FORK_NAME (org=$org, platform=$platform, phase=$phase) ==="
   if [ "${#discovered[@]}" -eq 0 ]; then
