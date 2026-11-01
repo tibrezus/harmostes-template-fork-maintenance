@@ -207,17 +207,26 @@ run_group() {
 
   local -a maintain=() excluded=() missing=()
   local m
+  # empty-pattern guard: grep -F "" matches EVERYTHING — an exclude/include
+  # parse that degrades to empty must never silently flip membership
+  # (the CI caught this: bracket-stripping was flavor-fragile, the parse
+  # degraded to empty, and grep -F "" excluded the whole org).
   if [ -n "$include" ]; then
     [ -n "$exclude" ] && { echo "ERROR: group.include and group.exclude are mutually exclusive" >&2; exit 1; }
-    for m in $include; do
+    while IFS= read -r m; do
+      [ -z "$m" ] && continue
       if printf '%s\n' "${discovered[@]}" | grep -qxF "$m"; then maintain+=("$m"); else missing+=("$m"); fi
-    done
+    done <<<"$include"
     [ "${#missing[@]}" -gt 0 ] && echo "WARNING: include entries not discovered: ${missing[*]}" >&2
-    echo "included (def): $(printf '%s ' $include)"
+    echo "included (def): ${include//$'\n'/ }"
   else
-    for m in "${discovered[@]}"; do
-      if printf '%s\n' $exclude | grep -qxF "$m"; then excluded+=("$m"); else maintain+=("$m"); fi
-    done
+    if [ -z "$exclude" ]; then
+      maintain=("${discovered[@]}")   # nothing excluded — everything is maintained
+    else
+      for m in "${discovered[@]}"; do
+        if printf '%s\n' "$exclude" | grep -qxF "$m"; then excluded+=("$m"); else maintain+=("$m"); fi
+      done
+    fi
     [ "${#excluded[@]}" -gt 0 ] && echo "excluded (def): ${excluded[*]}"
   fi
   if [ "${#maintain[@]}" -eq 0 ]; then

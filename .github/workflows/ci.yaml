@@ -17,6 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # PIN the yq flavor to PRODUCTION (the worker image apt-installs
+      # Debian's yq = mikefarah v4; the runner's preinstalled yq differs and
+      # degraded a group-def parse in CI — 2026-11-01). One line to bump.
+      - run: |
+          curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          yq --version
       - name: release identity + conflict contract (verbatim suites)
         run: |
           bash scripts/tests/derive-release-version.test.sh
