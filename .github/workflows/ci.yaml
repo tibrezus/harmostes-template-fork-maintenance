@@ -10,7 +10,7 @@ on:
 
 env:
   # The pinned kernel chart whose CRDs define conformance (one line to bump).
-  KERNEL_CHART: "1.9.1"
+  KERNEL_CHART: "1.10.0"  # first tag carrying tools/conformance (the harness moved into the kernel, #832)
 
 jobs:
   engine-contracts:
@@ -111,10 +111,14 @@ jobs:
           sudo mkdir -p /usr/local/kubebuilder/bin && sudo chown -R "$USER" /usr/local/kubebuilder
           curl -sL --retry 5 --retry-all-errors "https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v1.31.0/envtest-v1.31.0-linux-amd64.tar.gz" | tar -xz -C /tmp
           mv /tmp/controller-tools/envtest/* /usr/local/kubebuilder/bin/
-          # the harness is shared with harmostes-config — clone it at its pin
-          git clone --depth 1 https://github.com/tibrezus/harmostes-config /tmp/config
-          cd /tmp/config && go mod download 2>/dev/null || true
-          go run ./hack/conformance.go -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE"
+          # the harness ships IN the kernel (tools/conformance, same
+          # -crds/-objects interface) — the checkout above already carries it
+          # at the exact tag whose CRDs we validate against. The old external
+          # clone (tibrezus/harmostes-config) is retired/private (three-tier
+          # consolidation, !349).
+          # run INSIDE the kernel checkout — it is its own Go module (the
+          # outer repo's go.mod cannot see nested-module packages)
+          ( cd kernel && go run ./tools/conformance -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE" )
 
   def-schema:
     runs-on: ubuntu-latest
