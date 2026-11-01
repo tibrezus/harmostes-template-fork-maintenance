@@ -83,8 +83,16 @@ jobs:
         # skills/fork-maintenance/templates/ are verbatim copies an agent
         # loads. This job is the drift ALARM: an engine edit here without
         # the matching agents-repo sync fails THIS repo's CI.
+        # agents went PRIVATE (2026-10-29) and GitHub abuse-throttles this
+        # PAT's git ops from runner IPs — so the copy arrives via the REST
+        # tarball (api.github.com is a separate bucket; the freshness
+        # workflow proved it), never via a git clone.
+        env:
+          GH_TOKEN: ${{ secrets.HARMOSTES_GITHUB_TOKEN }}
         run: |
-          git clone --depth 1 https://github.com/tibrezus/agents /tmp/agents
+          gh api repos/tibrezus/agents/tarball/main > /tmp/agents.tar.gz
+          mkdir -p /tmp/agents
+          tar -xzf /tmp/agents.tar.gz -C /tmp/agents --strip-components=1
           HARMOSTES_TEMPLATE_DIR="$GITHUB_WORKSPACE" bash /tmp/agents/skills/fork-maintenance/scripts/check-drift.sh
   cr-conformance:
     runs-on: ubuntu-latest
