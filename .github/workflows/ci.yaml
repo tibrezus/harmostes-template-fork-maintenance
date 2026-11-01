@@ -111,10 +111,12 @@ jobs:
           sudo mkdir -p /usr/local/kubebuilder/bin && sudo chown -R "$USER" /usr/local/kubebuilder
           curl -sL --retry 5 --retry-all-errors "https://github.com/kubernetes-sigs/controller-tools/releases/download/envtest-v1.31.0/envtest-v1.31.0-linux-amd64.tar.gz" | tar -xz -C /tmp
           mv /tmp/controller-tools/envtest/* /usr/local/kubebuilder/bin/
-          # the harness is shared with harmostes-config — clone it at its pin
-          git clone --depth 1 https://github.com/tibrezus/harmostes-config /tmp/config
-          cd /tmp/config && go mod download 2>/dev/null || true
-          go run ./hack/conformance.go -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE"
+          # the harness ships IN the kernel (tools/conformance, same
+          # -crds/-objects interface) — the checkout above already carries it
+          # at the exact tag whose CRDs we validate against. The old external
+          # clone (tibrezus/harmostes-config) is retired/private (three-tier
+          # consolidation, !349).
+          go run ./kernel/tools/conformance -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE"
 
   def-schema:
     runs-on: ubuntu-latest
