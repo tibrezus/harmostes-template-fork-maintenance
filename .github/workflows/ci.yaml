@@ -116,7 +116,9 @@ jobs:
           # at the exact tag whose CRDs we validate against. The old external
           # clone (tibrezus/harmostes-config) is retired/private (three-tier
           # consolidation, !349).
-          go run ./kernel/tools/conformance -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE"
+          # run INSIDE the kernel checkout — it is its own Go module (the
+          # outer repo's go.mod cannot see nested-module packages)
+          ( cd kernel && go run ./tools/conformance -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE" )
 
   def-schema:
     runs-on: ubuntu-latest
