@@ -113,6 +113,47 @@ host_setup() {
   echo "[git-host] platform=$platform token_env=$token_env repo=$(host_owner_repo)"
 }
 
+# ---- org/group enumeration (group defs, kind: group) ------------------------
+
+# host_list_org_forks ORG → the org's FORK repo names (bare), one per line.
+# Only isFork repos are maintained — an org may also hold non-fork repos
+# (registries, docs) that are not upstream-sync targets.
+host_list_org_forks() {
+  local org="$1" platform
+  platform=$(_git_host_ry '.group.platform // .fork.platform // "github"')
+  case "$platform" in
+    github)
+      gh api "orgs/$org/repos" --paginate -q '.[] | select(.fork) | .name' ;;
+    forgejo)
+      local page=1 out
+      while :; do
+        out=$(curl -sf "${FORGEJO_API:?forgejo group requires FORGEJO_API}/orgs/$org/repos?limit=50&page=$page") || break
+        [ "$(printf '%s' "$out" | jq 'length')" = "0" ] && break
+        printf '%s' "$out" | jq -r '.[] | select(.fork) | .name'
+        page=$((page+1))
+      done ;;
+    *)
+      echo "ERROR: host_list_org_forks: unknown platform '$platform'" >&2
+      return 1 ;;
+  esac
+}
+
+# host_repo_parent OWNER/REPO → "<parent-url> <parent-default-branch>";
+# empty when the fork is DETACHED (GitHub nulls .parent — the caller must
+# fall back to the def's upstream_map) or the host does not track parentage.
+host_repo_parent() {
+  local owner_repo="$1" platform
+  platform=$(_git_host_ry '.group.platform // .fork.platform // "github"')
+  case "$platform" in
+    github)
+      gh api "repos/$owner_repo" -q 'if .parent then (.parent.html_url + " " + .parent.default_branch) else "" end' 2>/dev/null ;;
+    forgejo)
+      curl -sf "${FORGEJO_API:?}/repos/$owner_repo" \
+        | jq -r 'if .parent then (.parent.html_url + " " + .parent.default_branch) else "" end' 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---- label creation ----------------------------------------------------------
 
 host_label_create() {

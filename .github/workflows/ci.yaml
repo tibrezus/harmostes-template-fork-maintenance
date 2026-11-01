@@ -21,6 +21,20 @@ jobs:
         run: |
           bash scripts/tests/derive-release-version.test.sh
           bash scripts/tests/conflict-contract.test.sh
+          bash scripts/tests/group-defs.test.sh
+      - name: group-def schema gate (validator accepts the shape, rejects the broken ones)
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d)
+          mkdir -p "$TMP/checks" "$TMP/forks"
+          cp checks/validate-fork.sh "$TMP/checks/"
+          cp checks/testdata/group/ok.yaml "$TMP/forks/g-ok.yaml"
+          cp checks/testdata/group/bad-both.yaml "$TMP/forks/g-bad.yaml"
+          bash "$TMP/checks/validate-fork.sh" g-ok "$TMP" > /dev/null
+          if bash "$TMP/checks/validate-fork.sh" g-bad "$TMP" 2>/dev/null; then
+            echo "::error::group def with include+exclude must be REJECTED"; exit 1
+          fi
+          echo "group schema: accepted ok.yaml, rejected bad-both.yaml ✓"
 
       - uses: actions/setup-go@v5
         with:
