@@ -1,0 +1,167 @@
+# ── The fork-conflict-resolver — a COMPONENT OF THIS WORKFLOW ───────────────
+# Component localization (the hard requirement, ADR-0011 amendment
+# 2026-11-03): every logic and workload shape related to fork-maintenance
+# lives HERE, in the workflow's template repo — the kernel chart renders
+# only the workflow-core unifier, and deployment DECISIONS (model,
+# resources) live in the config tier as patches on THIS resource (the
+# fork-maintenance Kustomization in k8s-config carries them; the
+# render-conformance job enforces the model's presence).
+#
+# Always-on HTTP service for fork-sync conflicts: sync-fork.sh POSTs
+# fork.conflict.needs-resolution events to /events; the resolver spawns
+# resolve-conflict.sh detached, which recreates the conflict, invokes pi
+# with the fork-maintenance skill, re-validates and deploys (or escalates).
+# Direct HTTP, not Dapr pub/sub (conflict-subscriber.py header — pubsub
+# dropped events during pod restarts; the dapr registration in the script
+# is vestigial, no daprd sidecar here, by design).
+#
+# Roll-on-change: the engine ConfigMaps below are RESOLVER-SCOPED generated
+# copies (hashed names — kustomize rewrites the Deployment refs), so any
+# engine/skill/extension edit in this repo rolls this pod automatically.
+# The pool mounts separate STATIC copies by chart-values contract; the defs
+# CM is config-tier-delivered under a static name (same posture as the
+# pool's defs mount — defs changes don't roll consumers, documented).
+apiVersion: v1
+kind: Service
+metadata:
+  name: fork-conflict-resolver
+  labels:
+    app.kubernetes.io/name: fork-conflict-resolver
+spec:
+  selector:
+    app.kubernetes.io/name: fork-conflict-resolver
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fork-conflict-resolver
+  labels:
+    app.kubernetes.io/name: fork-conflict-resolver
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fork-conflict-resolver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fork-conflict-resolver
+    spec:
+      # the core service account (k8s API access for the deploy step)
+      serviceAccountName: harmostes-controller
+      containers:
+        - name: resolver
+          # the component's runtime image (a #507-era llm-wiki build carrying
+          # pi + git + kubectl); the config tier may pin a different tag
+          image: ghcr.io/tibrezus/llm-wiki-controller:0.3.0
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Register the litellm-provider pi extension (mounted at
+              # /extensions/litellm-provider) so resolve-conflict.sh's agent
+              # uses litellm/* models. The worker image bakes this in; the
+              # resolver image doesn't — write it at startup.
+              mkdir -p /root/.pi/agent &&
+              printf '%s\n' '{"packages":["/extensions/litellm-provider"]}' > /root/.pi/agent/settings.json &&
+              # No npm:pi-searxng (the worker image bakes it): conflict
+              # resolution is git surgery, not web research — deliberate.
+              exec python3 /workspace/scripts/conflict-subscriber.py
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: NAMESPACE
+              value: harmostes
+            - name: RESOLVER_SCRIPT
+              value: /workspace/scripts/resolve-conflict.sh
+            - name: MAINT_DIR
+              value: /workspace
+            # the shared pi RPC orchestrator (downloaded on startup)
+            - name: HARMOSTES
+              value: python3 /usr/local/bin/harmostes.py
+            - name: SKILL_PATH
+              value: /workspace/skill/SKILL.md
+            # RESOLVER_MODEL IS A CONFIG-TIER DECISION — deliberately ABSENT
+            # from this base. The fork-maintenance Kustomization in k8s-config
+            # patches it (litellm/-prefixed; render-conformance enforces the
+            # patch's presence). An unqualified fallback is unreachable under
+            # the registered provider (r1 review, P4).
+            - name: LITELLM_URL
+              valueFrom:
+                secretKeyRef:
+                  name: harmostes-litellm-token
+                  key: url
+            - name: LITELLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harmostes-litellm-token
+                  key: key
+            # Host PAT (git push/PR/merge)
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harmostes-github-token
+                  key: token
+            # GH_TOKEN authenticates the `gh` CLI (read automatically by gh).
+            - name: GH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: harmostes-github-token
+                  key: token
+            # z.ai provider key — resolve-conflict.sh may invoke pi DIRECTLY
+            # on zai/glm-* (its own fallback default), not through the litellm
+            # proxy; without it such resolutions exit rc=1 before pi starts
+            # and the conflict escalates to a needs-fix PR (#587).
+            - name: ZAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: harmostes-zai-token
+                  key: token
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: scripts, mountPath: /workspace/scripts, readOnly: true }
+            - { name: checks,  mountPath: /workspace/checks, readOnly: true }
+            - { name: defs,    mountPath: /workspace/forks, readOnly: true }
+            - { name: hooks,   mountPath: /workspace/post-merge-hooks, readOnly: true }
+            - { name: skill,   mountPath: /workspace/skill, readOnly: true }
+            - { name: litellm-ext, mountPath: /extensions/litellm-provider, readOnly: true }
+            - { name: manifests, mountPath: /workspace/manifests }
+            - { name: home,    mountPath: /root }
+      volumes:
+        - name: scripts
+          configMap: { name: resolver-scripts, defaultMode: 0755 }
+        - name: checks
+          configMap: { name: resolver-checks, defaultMode: 0755 }
+        - name: defs
+          configMap: { name: fork-maintenance-defs }   # config-tier static
+        - name: hooks
+          configMap: { name: resolver-hooks, defaultMode: 0755 }
+        - name: skill
+          configMap:
+            name: resolver-skill
+            items:
+              - { key: SKILL.md, path: SKILL.md }
+              - { key: conflict-resolution.md, path: references/conflict-resolution.md }
+              - { key: safeguards.md, path: references/safeguards.md }
+              - { key: architecture.md, path: references/architecture.md }
+        - name: manifests
+          emptyDir: {}
+        - name: litellm-ext
+          configMap:
+            name: litellm-provider-extension
+        - name: home
+          emptyDir: {}
