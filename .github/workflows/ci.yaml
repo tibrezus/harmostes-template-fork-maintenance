@@ -10,7 +10,7 @@ on:
 
 env:
   # The pinned kernel chart whose CRDs define conformance (one line to bump).
-  KERNEL_CHART: "1.10.0"  # first tag carrying tools/conformance (the harness moved into the kernel, #832)
+  KERNEL_CHART: "1.11.2"  # carries tools/conformance -allow-workloads (the component-localization conformance mode)
 
 jobs:
   engine-contracts:
@@ -73,6 +73,21 @@ jobs:
           fi
           echo "go_test gate fixture: blocked broken behavior, passed green, errored on bad def ✓"
 
+  extension-drift:
+    runs-on: ubuntu-latest
+    needs: engine-contracts
+    steps:
+      - uses: actions/checkout@v4
+      - name: the pinned litellm-provider copy matches the kernel at the pin
+        # The resolver's pi extension is a verbatim copy of the kernel's
+        # extensions/litellm-provider/ (the same source the worker image
+        # bakes in). This is the drift ALARM: a kernel extension change
+        # without re-copying here fails this repo's CI (the chart's
+        # `make test-extensions` role, relocated with the component).
+        run: |
+          git clone --depth 1 --branch v${{ env.KERNEL_CHART }} https://github.com/tibrezus/harmostes /tmp/kernel
+          diff -r /tmp/kernel/extensions/litellm-provider litellm-provider             && echo "extension copy matches the kernel pin ✓"             || { echo "::error::litellm-provider copy has drifted from the kernel pin — re-copy and commit"; exit 1; }
+
   skill-drift:
     runs-on: ubuntu-latest
     needs: engine-contracts
@@ -118,7 +133,7 @@ jobs:
           # consolidation, !349).
           # run INSIDE the kernel checkout — it is its own Go module (the
           # outer repo's go.mod cannot see nested-module packages)
-          ( cd kernel && go run ./tools/conformance -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE" )
+          ( cd kernel && go run ./tools/conformance -allow-workloads -crds "$GITHUB_WORKSPACE/kernel/chart/crds" -objects "$GITHUB_WORKSPACE" )
 
   def-schema:
     runs-on: ubuntu-latest
