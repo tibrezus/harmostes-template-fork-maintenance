@@ -5,7 +5,7 @@
 #     consume (forkMaintenance.*ConfigMap values), so a deployment running
 #     forkMaintenance.payload=external mounts repo-delivered bytes.
 #     fork-maintenance-defs is NOT here: defs are per-env DATA (config tier,
-#     tibrezus/harmostes-config overlays).
+#     k8s-config platform/harmostes/config overlays).
 # Explicit file lists, never globs: scripts/tests and checks/testdata are
 # CI fixtures, not engine payload.
 apiVersion: kustomize.config.k8s.io/v1beta1
