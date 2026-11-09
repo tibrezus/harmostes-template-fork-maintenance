@@ -144,20 +144,16 @@ mapping_walk() {
 
   if [ "$conflicted" = "1" ]; then
     echo "::notice::one or more rows await conflict resolution (PRs above) — resolver escalated"
-    [ "$PHASED" = "1" ] && result_json false "fork-sync-$FORK_NAME" merge "conflicts — resolver escalated"
     return 2   # same escalation code as legacy merge mode's conflict path (#637)
-  fi
-  if [ "$changed" = "1" ]; then
-    [ "$PHASED" = "1" ] && result_json true "fork-sync-$FORK_NAME" merge "row(s) merged+validated+pushed"
-  else
-    [ "$PHASED" = "1" ] && result_json false "fork-sync-$FORK_NAME" merge "no-op — invariant holds"
   fi
   return 0
 }
 
 mapping_dispatch() {
+  # PHASE is always "all" here (the arg gate rejects the former per-phase
+  # invocations — #636 Option A).
   case "$PHASE" in
-    merge|all)
+    all)
       echo "=== [$PHASE] fork: $FORK_NAME (mode: mapping) ==="
       if [ "${DRY_RUN:-0}" = "1" ]; then
         echo "DRY RUN — fetch-only detect (nothing merged/pushed):"
@@ -182,18 +178,6 @@ mapping_dispatch() {
       # validation failure — both must reach the plugin (set -e would have
       # killed the bare call; an explicit exit keeps that contract visible).
       [ "$walk_rc" -eq 0 ] || exit "$walk_rc"
-      ;;
-    gates|validate)
-      echo "=== [$PHASE] mapping mode: validation is repo-local and runs inside the row walk — structural no-op"
-      [ "$PHASED" = "1" ] && result_json false "fork-sync-$FORK_NAME" "$PHASE" "no-op (repo-local validation rides the merge phase)"
-      ;;
-    pr)
-      echo "=== [$PHASE] mapping mode: clean merges push directly (green run IS the review); conflict PRs are opened during the walk — structural no-op"
-      [ "$PHASED" = "1" ] && result_json false "fork-sync-$FORK_NAME" pr "no-op (direct push; conflict PRs ride the walk)"
-      ;;
-    tag)
-      echo "=== [$PHASE] mapping mode: a sync NEVER mints a version — tags are deliberate cuts (tags: derive) ==="
-      [ "$PHASED" = "1" ] && result_json false "fork-sync-$FORK_NAME" tag "no-op (deliberate tags only)"
       ;;
     *) echo "ERROR: unknown phase '$PHASE'" >&2; exit 1 ;;
   esac
