@@ -27,11 +27,14 @@
 #   pr        exit 0 {changed:true|false}       false = PR left for review (no auto-merge)
 #   tag       exit 0 {changed:true|false}       machine-cut v<upstream>-rezus.<N+1>
 #
-# ALL MODE (default — legacy single-shot for forks not yet graph-native):
-# exit codes: 0 = up to date or PR opened (auto-merged if auto.merge);
-#             2 = merge conflict (needs resolution PR created); 3 = push failure.
+# THE single flow (owner-ruled #636 Option A, 2026-11-09): one event-driven
+# single-shot walk — exit codes: 0 = up to date or PR opened (auto-merged if
+# auto.merge); 2 = merge conflict (needs resolution PR created); 3 = push
+# failure. The former phased (graph-node) mode had zero callers and is
+# removed; fan-out is the event fabric's job (webhook → trigger), not
+# in-script phase state.
 #
-# Usage: sync-fork.sh <fork-name> [merge|hook|gates|validate|pr|tag|all]
+# Usage: sync-fork.sh <fork-name> [all]
 # Requires: git, gh (GitHub CLI), yq, bash
 # Environment: GITHUB_TOKEN (PAT with repo + workflow scope on the forks)
 # =============================================================================
@@ -41,9 +44,8 @@ set -euo pipefail
 FORK_NAME="${1:?Usage: sync-fork.sh <fork-name> [merge|hook|gates|validate|pr|tag|all]}"
 PHASE="${2:-all}"
 case "$PHASE" in
-  merge|hook|gates|validate|pr|tag) PHASED=1 ;;
-  all) PHASED=0 ;;
-  *) echo "ERROR: unknown phase '$PHASE'" >&2; exit 1 ;;
+  all) : ;;
+  *) echo "ERROR: unknown phase '$PHASE' — phased mode removed (#636 Option A): one event-driven flow, single-shot" >&2; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -368,30 +370,6 @@ source "$SCRIPT_DIR/conflict-event.sh"
 # The clone lives under HARMOSTES_WORKDIR (the graph executor shares one workdir
 # across the run's nodes) and state passes through .git/harmostes-state.env
 # (inside .git so it never pollutes the working tree).
-STATE_FILE=""
-state_save() {
-  { for v in FORK_NAME UPSTREAM_URL UPSTREAM_BRANCH FORK_URL FORK_DEFAULT_BRANCH \
-             FORK_MIRROR_BRANCH SYNC_DATE SYNC_BRANCH MERGE_BASE UPSTREAM_HEAD \
-             NEW_COMMITS BASELINE PATCH_STATUS PATCH_RESULTS HOOK_RAN; do
-      printf '%s=%q\n' "$v" "${!v:-}"
-    done
-    printf 'VALIDATION_FAILED=%q\n' "${VALIDATION_FAILED:-false}"
-    printf 'DIVERGENCE_FAILED=%q\n' "${DIVERGENCE_FAILED:-false}"
-    printf 'VALIDATION_RESULTS=%q\n' "${VALIDATION_RESULTS:-(validation not run)}"
-  } > "$STATE_FILE"
-}
-state_load() {
-  # STATE_FILE is per-process state: recompute it for phased runs (the merge
-  # phase that created it ran in a different process/node).
-  if [ "$PHASED" = "1" ] && [ -z "${STATE_FILE:-}" ]; then
-    STATE_FILE="${HARMOSTES_WORKDIR:-/tmp}"
-    STATE_FILE="${STATE_FILE%/}/fork-${FORK_NAME}/.git/harmostes-state.env"
-  fi
-  [ -n "${STATE_FILE:-}" ] && [ -f "$STATE_FILE" ] || { echo "ERROR: no sync state — run the merge phase first" >&2; exit 1; }
-  # shellcheck disable=SC1090
-  source "$STATE_FILE"
-}
-
 # push_sync_branch pushes the disposable sync branch: force-with-lease when a
 # remote-tracking ref is known (protects foreign updates), plain --force when the
 # shallow clone lacks the tracking ref (same-day re-runs legitimately recreate
@@ -413,15 +391,7 @@ result_json() {
 
 # ── Phase: merge (clone → merge-base check → merge → divergences) ────────────
 phase_merge() {
-  if [ "$PHASED" = "1" ]; then
-    WORKDIR_ROOT="${HARMOSTES_WORKDIR:-/tmp}"
-    WORKDIR="${WORKDIR_ROOT%/}/fork-${FORK_NAME}"
-    rm -rf "$WORKDIR"          # stale clone from a prior failed run on this pod
-    mkdir -p "$WORKDIR_ROOT"
-    STATE_FILE="$WORKDIR/.git-state.env"  # placeholder; real .git exists after clone
-  else
-    WORKDIR=$(mktemp -d)
-  fi
+  WORKDIR=$(mktemp -d)
 
   echo ""
   echo "=== Cloning fork (shallow) ==="
@@ -434,24 +404,18 @@ phase_merge() {
   git clone --depth 100 "$FORK_URL" "$WORKDIR"
   cd "$WORKDIR"
   git fetch --depth 100 origin "refs/heads/$FORK_DEFAULT_BRANCH:refs/remotes/origin/$FORK_DEFAULT_BRANCH" 2>/dev/null || true
-  STATE_FILE="$WORKDIR/.git/harmostes-state.env"
 
   # shellcheck source=scripts/git-host.sh
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/git-host.sh"
   host_setup
 
-  # Phased mode merges the LOCAL MIRROR BRANCH (same host as the fork, kept
-  # current by the upstream-mirror action + push webhook) — no upstream-host
-  # fetch. The alias remote keeps every downstream `upstream/<branch>` ref
-  # working. Legacy (all) mode fetches the upstream host directly.
-  if [ "$PHASED" = "1" ]; then
-    git remote add upstream "$FORK_URL"
-    git fetch --depth 100 upstream "$UPSTREAM_BRANCH" --tags
-  else
-    git remote add upstream "$UPSTREAM_URL"
-    git fetch --depth 100 upstream "$UPSTREAM_BRANCH" --tags
-  fi
+  # The upstream-host fetch: `upstream/<branch>` refs feed the merge-base
+  # check. (The removed phased mode aliased the fork URL here to merge the
+  # LOCAL mirror branch — gone with #636; the upstream-mirror Action keeps
+  # the mirror current either way.)
+  git remote add upstream "$UPSTREAM_URL"
+  git fetch --depth 100 upstream "$UPSTREAM_BRANCH" --tags
 
   CURRENT_BRANCH=$(git branch --show-current)
   # ── Release-branch bootstrap ────────────────────────────────────────────
@@ -526,11 +490,7 @@ phase_merge() {
   if [ "$MASTER_UPTODATE" = 1 ] && [ -z "${REFS_PENDING// /}" ]; then
     echo ""
     echo "=== Already up to date — mirror has no new commits, release lines contained ==="
-    if [ "$PHASED" = "1" ]; then
-      result_json false "fork-sync-$FORK_NAME" merge "up to date — nothing to merge"
-      exit 0
-    fi
-    # all-mode (#627): a fully converged fork may still owe its RELEASE CUT —
+    # (#627): a fully converged fork may still owe its RELEASE CUT —
     # the identity can have moved since the last cut (upstream tagged a
     # release whose line the fork already carries). Fall through to the tag
     # phase; its own derivation + ordinal + already-tagged guards decide.
@@ -653,10 +613,6 @@ phase_merge() {
 
   echo ""
   echo "=== Merge completed cleanly ==="
-  if [ "$PHASED" = "1" ]; then
-    state_save
-    result_json true "fork-sync-$FORK_NAME" merge "merged ${NEW_COMMITS} upstream commit(s)"
-  fi
 }
 
 # ── Phase: hook (per-fork codegen: SDK regen, chart vendor, …) ───────────────
@@ -674,10 +630,6 @@ phase_hook() {
       echo "WARNING: post-merge hook failed — continuing but review needed"
     }
     HOOK_RAN=true
-  fi
-  if [ "$PHASED" = "1" ]; then
-    state_save
-    result_json true "fork-sync-$FORK_NAME" hook "post-merge hook complete"
   fi
 }
 
@@ -732,25 +684,8 @@ phase_gates() {
     echo "  manifest written: $MANIFEST_FILE"
   fi
 
-  if [ "$PHASED" = "1" ]; then
-    if $DIVERGENCE_FAILED || [ "$PATCH_STATUS" != "all-intact" ]; then
-      # Honest red node + a review surface: push the sync branch and open a
-      # needs-fix PR so a human can fix on the merged branch (no auto-merge).
-      echo ""
-      echo "=== Gates RED — pushing sync branch + needs-fix PR ==="
-      push_sync_branch 2>&1 || { echo "ERROR: failed to push sync branch" >&2; exit 3; }
-      host_label_create "needs-fix" D93F0B 2>/dev/null || true
-      host_pr_create "$FORK_DEFAULT_BRANCH" "$SYNC_BRANCH" \
-        "sync: $FORK_NAME — gates RED ($SYNC_DATE)" \
-        "Divergence or patch verification failed after the upstream merge. See the run envelopes; fix on this branch, then re-run." \
-        "needs-fix" 2>/dev/null || echo "  (PR creation failed)"
-      state_save
-      echo "ERROR: gates red — a fork feature or patch signature did not survive the merge" >&2
-      exit 1
-    fi
-    state_save
-    result_json true "fork-sync-$FORK_NAME" gates "divergence + patches intact"
-  fi
+  # (Redness flows into phase_pr's label logic: needs-fix / needs-review PRs
+  # never auto-merge — the single-flow encoding since the phased mode left.)
 }
 
 # ── Phase: validate (the fork's declared validation suite) ───────────────────
@@ -775,14 +710,6 @@ phase_validate() {
     fi
   else
     echo "=== No validator available — skipping ==="
-  fi
-  if [ "$PHASED" = "1" ]; then
-    state_save
-    if $VALIDATION_FAILED; then
-      echo "ERROR: validation failed — see output above" >&2
-      exit 1
-    fi
-    result_json true "fork-sync-$FORK_NAME" validate "validation green"
   fi
 }
 
@@ -827,12 +754,6 @@ phase_pr() {
     MERGE_SHA=$(host_pr_merge "$SYNC_BRANCH" 2>&1) || {
       echo "WARNING: auto-merge failed: $MERGE_SHA" >&2
     }
-    [ "$PHASED" = "1" ] && printf 'MERGE_SHA=%q\n' "${MERGE_SHA:-}" >> "$STATE_FILE"
-    if [ "$PHASED" = "1" ]; then
-      result_json true "fork-sync-$FORK_NAME" pr "PR merged (${MERGE_SHA:0:12})"
-    fi
-  elif [ "$PHASED" = "1" ]; then
-    result_json false "fork-sync-$FORK_NAME" pr "PR left for review (label=$PR_LABEL; auto.merge=$AUTO_MERGE)"
   fi
 }
 
@@ -849,9 +770,6 @@ phase_tag() {
   if [ "$AUTO_RELEASE" != "true" ]; then
     echo ""
     echo "=== No release (auto.release=$AUTO_RELEASE, merged=${MERGE_SHA:+yes}${MERGE_SHA:-no}) ==="
-    if [ "$PHASED" = "1" ]; then
-      result_json false "fork-sync-$FORK_NAME" tag "no release"
-    fi
     return 0
   fi
 
@@ -895,26 +813,17 @@ phase_tag() {
     fi
   done
   if [ "${REL_REF_UNMERGED:-0}" = 1 ]; then
-    if [ "$PHASED" = "1" ]; then
-      result_json false "fork-sync-$FORK_NAME" tag "release line not merged — sync first"
-    fi
     return 0
   fi
 
   UPSTREAM_PATTERN=$(read_yaml '.versioning.upstream_pattern // "auto"' 2>/dev/null || echo auto)
   if ! derive_upstream_identity "HEAD" "$UPSTREAM_URL" "$UPSTREAM_PATTERN"; then
     echo "WARNING: could not determine upstream release identity — skipping auto-release (#627: never mint blind)" >&2
-    if [ "$PHASED" = "1" ]; then
-      result_json false "fork-sync-$FORK_NAME" tag "no upstream release derivable"
-    fi
     return 0
   fi
   PREV_ANCHOR=$(previous_anchor "$FORK_URL")
   if [ "$IDENTITY_STATE" = "behind" ]; then
     echo "WARNING: upstream $REMOTE_LATEST is newer than anything reachable from $FORK_DEFAULT_BRANCH — its content is NOT in this tree (#627 exact mapping); declare upstream.release_refs or a mapping row for its line. NOT minting a stale-identity tag." >&2
-    if [ "$PHASED" = "1" ]; then
-      result_json false "fork-sync-$FORK_NAME" tag "identity behind ($REMOTE_LATEST not in tree)"
-    fi
     return 0
   fi
   if [ -n "$PREV_ANCHOR" ] && [ "$PREV_ANCHOR" != "$IDENTITY" ]; then
@@ -948,23 +857,13 @@ phase_tag() {
       RELEASE_TAG=""
     fi
   fi
-  if [ "$PHASED" = "1" ]; then
-    [ -n "$RELEASE_TAG" ] && result_json true "$RELEASE_TAG" tag "release tag cut (identity $IDENTITY, $IDENTITY_STATE)" \
-                         || result_json false "fork-sync-$FORK_NAME" tag "no release"
-  fi
+  if [ -n "$RELEASE_TAG" ]; then echo "  released $RELEASE_TAG (identity $IDENTITY, $IDENTITY_STATE)"; fi
 }
 
-# cd into the phased clone (state must exist). Re-sources the host abstraction:
-# each phase runs as its own process (its own graph node) and needs the
-# host_* helpers + credentials.
+# cd into the run's clone. Re-sources the host abstraction (host_* helpers +
+# credentials).
 cd_repo() {
-  if [ "$PHASED" = "1" ]; then
-    state_load                 # separate process per node — reload state
-    WORKDIR="${HARMOSTES_WORKDIR:-/tmp}"; WORKDIR="${WORKDIR%/}/fork-${FORK_NAME}"
-    cd "$WORKDIR"
-  else
-    cd "$WORKDIR"              # single process — state is in memory
-  fi
+  cd "$WORKDIR"              # single process — state is in memory
   # shellcheck source=scripts/git-host.sh
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/git-host.sh"
@@ -1018,17 +917,12 @@ if [ "$MODE" = "mapping" ]; then
   exit 0
 fi
 
-case "$PHASE" in
-  merge)    phase_merge ;;
-  hook)     phase_hook ;;
-  gates)    phase_gates ;;
-  validate) phase_validate ;;
-  pr)       phase_pr ;;
-  tag)      phase_tag ;;
-  all)
-    # Legacy single-shot flow for forks not yet graph-native. Exit codes:
-    # 0 = up to date or PR opened (auto-merged if auto.merge); 2 = conflict;
-    # 3 = push failure. Identical semantics to the pre-phase-mode single-shot flow.
+# ── Dispatch: the single flow (#636 Option A — owner-ruled event-driven) ────
+# Exit codes: 0 = up to date or PR opened (auto-merged if auto.merge);
+# 2 = conflict; 3 = push failure. The former per-phase (graph-node) arms are
+# removed — fan-out is Dapr's event fabric (webhook → trigger), not
+# in-script phase state.
+{
     phase_merge          # exits 0 (up-to-date) or 2 (conflict) or 3 on its own
     phase_hook
     phase_validate
@@ -1045,8 +939,7 @@ case "$PHASE" in
     echo "  Patch status: ${PATCH_STATUS}"
     echo "  Divergence: $(if $DIVERGENCE_FAILED; then echo '❌ LOST (needs-fix)'; else echo '✅ intact'; fi)"
     [ -n "${RELEASE_TAG:-}" ] && echo "  Released tag: $RELEASE_TAG (image build triggered)"
-    ;;
-esac
+}
 
 # Exit 0 explicitly: with set -e, a bare `[ -n "" ] && ...` as the final
 # statement returns 1, which made every successful sync (auto.release: false

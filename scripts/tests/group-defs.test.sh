@@ -237,7 +237,7 @@ EOF
 # merge phase only: upstream main (FETCH_HEAD) == fork main → the bootstrap
 # seeds rezus/main, then the is-ancestor check sees upstream contained → no-op
 cd "$BS"
-OUT5=$(HOME="$BS" bash "$BS/maint/scripts/sync-fork.sh" canary2 merge 2>&1); RC5=$?
+OUT5=$(HOME="$BS" bash "$BS/maint/scripts/sync-fork.sh" canary2 all 2>&1); RC5=$?
 assert_eq "$RC5" "0" "bootstrap run completes (upstream contained after seeding)"
 git --git-dir="$FORK_PATH" rev-parse --verify -q refs/heads/rezus/main >/dev/null && ok "rezus/main exists on the fork after bootstrap" || fail "rezus/main not seeded"
 git --git-dir="$FORK_PATH" rev-parse refs/heads/rezus/main > "$WORK/seeded.sha"
@@ -250,7 +250,7 @@ grep -q "BOOTSTRAP" <<<"$OUT5" && ok "bootstrap is loud" || fail "bootstrap not 
 # ref) with rezus/main NOW EXISTING on the fork — the explicit release-branch
 # fetch must make the checkout work (the old code died: origin/rezus/main
 # "is not a commit")
-OUT6=$(HOME="$BS" bash "$BS/maint/scripts/sync-fork.sh" canary2 merge 2>&1); RC6=$?
+OUT6=$(HOME="$BS" bash "$BS/maint/scripts/sync-fork.sh" canary2 all 2>&1); RC6=$?
 assert_eq "$RC6" "0" "second run (existing release branch, fresh shallow clone) completes"
 grep -q "Already up to date" <<<"$OUT6" && ok "second run is a clean no-op" || fail "second run should no-op (upstream unchanged)"
 
