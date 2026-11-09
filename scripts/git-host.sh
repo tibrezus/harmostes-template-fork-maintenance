@@ -309,18 +309,22 @@ host_pr_close_conflicts() {
 # ---- PR CI watch (subtree auto-merge guard — never merge red) ----------------
 
 host_pr_watch() {
-  # $1 = branch whose PR checks must be green. Blocks until terminal state
-  # (60 min cap), returns non-zero if any check failed or the deadline passed.
-  local branch="$1"
+  # $1 = branch whose PR checks must be green. Bounded watch (agility hard
+  # rule): DW_WATCH_BUDGET (default 600 s), 30-s refresh, live progress —
+  # budget exceeded = broken pipeline → diagnose, never idle. Returns
+  # non-zero if any check failed or the budget ran out.
+  local branch="$1" budget="${DW_WATCH_BUDGET:-600}" rc=0
   case "$(host_platform)" in
     github)
-      gh pr checks "$branch" --repo "$(host_owner_repo)" --watch --interval 20 >/dev/null 2>&1 || return 1
+      timeout --foreground "$budget" gh pr checks "$branch" --repo "$(host_owner_repo)" \
+        --watch --interval 30 --fail-fast >&2 || rc=$?
+      [ "$rc" -ne 124 ] || echo "fork-maintenance: CI watch budget (${budget}s) exceeded — broken or mis-wired; diagnose, never idle longer" >&2
       gh pr checks "$branch" --repo "$(host_owner_repo)" --json state \
         -q 'length == 0 or all(.[]; .state == "SUCCESS")' 2>/dev/null | grep -q true
       ;;
     forgejo)
-      # Poll the head commit's combined status until terminal.
-      local deadline=$(( $(date +%s) + 3600 )) st sha
+      # Poll the head commit's combined status until terminal — bounded.
+      local deadline=$(( $(date +%s) + budget )) st sha
       sha=$(git rev-parse HEAD 2>/dev/null) || return 1
       while [ "$(date +%s)" -lt "$deadline" ]; do
         st=$(curl -sf -H "Authorization: token ${FORK_TOKEN}" \
@@ -330,8 +334,10 @@ host_pr_watch() {
           success) return 0 ;;
           failure|error) return 1 ;;
         esac
+        echo "fork-maintenance: CI pending (${st:-no status}) — $(( deadline - $(date +%s) ))s/${budget}s left" >&2
         sleep 30
       done
+      echo "fork-maintenance: CI watch budget (${budget}s) exceeded — broken or mis-wired; diagnose, never idle longer" >&2
       return 1
       ;;
     local) return 0 ;;   # file:// repos have no CI surface
