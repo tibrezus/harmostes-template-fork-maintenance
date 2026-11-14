@@ -63,7 +63,12 @@
  * ids and empty-filtering chains surface via droppedIds / the wiring
  * summary instead). The default table carries an entry for every live
  * primary direction (speed, flash, glm); a LITELLM_FALLBACKS override
- * REPLACES the whole map — '{}' is the off-switch. (5) A failover moves
+ * REPLACES the whole map — '{}' is the off-switch. (5a) FAILOVER
+ * DEADLINE (owner directive 2026-11-14, reactiveness): chained models
+ * additionally carry `timeout` + `num_retries: 0`
+ * (LITELLM_PRIMARY_TIMEOUT_S, default 100s, 0 = off) so a silent local
+ * primary shifts at the deadline — timeout.ts owns the composite
+ * contract with pi's 2-minute HTTP wall. (5) A failover moves
  * the whole review context to a
  * DIFFERENT upstream group — chains are Deployment-env-settable, so the
  * trust boundary for review payloads is whoever can edit that Deployment.
@@ -71,6 +76,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { applyChains, resolveFallbackChains, wiringSummary } from "./fallbacks.ts";
 import { FLEET_SAMPLING_BY_THINKING_LEVEL } from "./sampling.ts";
+import { resolvePrimaryTimeout } from "./timeout.ts";
 import { deserializeThinking, wireThinkingMap } from "./thinking.ts";
 
 export default async function (pi: ExtensionAPI) {
@@ -122,9 +128,20 @@ export default async function (pi: ExtensionAPI) {
   if (warning) {
     console.error(`[litellm-provider] ${warning}`);
   }
+  // Failover deadline (owner directive 2026-11-14 — reactiveness): a
+  // wired chain also carries `timeout` + `num_retries: 0`, so a busy
+  // local primary shifts to the fallback at the deadline instead of
+  // stalling the round. 0 = off. timeout.ts owns the composite contract
+  // with pi's 2-minute HTTP wall (settings.json httpIdleTimeoutMs).
+  const { seconds: failoverDeadlineS, warning: timeoutWarning } = resolvePrimaryTimeout(
+    process.env.LITELLM_PRIMARY_TIMEOUT_S,
+  );
+  if (timeoutWarning) {
+    console.error(`[litellm-provider] ${timeoutWarning}`);
+  }
   const byId = new Map(models.map((m) => [m.id, m]));
 
-  const { wired, annotated, unwiredChains } = applyChains(models, fallbacks, byId);
+  const { wired, annotated, unwiredChains } = applyChains(models, fallbacks, byId, failoverDeadlineS);
   if (unwiredChains.length > 0) {
     // Expected on any proxy that serves a SUBSET of the live primaries
     // (the default table is deliberately a superset — honest-limits (4)):
@@ -203,6 +220,7 @@ export default async function (pi: ExtensionAPI) {
   // and non-empty. Anything else is "no fallbacks wired" for that model.
   console.error(
     `[litellm-provider] registered ${models.length} model(s): ${models.map((m) => m.id).join(", ")}` +
-      wiringSummary(wired, fallbacks),
+      wiringSummary(wired, fallbacks) +
+      (failoverDeadlineS > 0 ? ` | failover deadline: ${failoverDeadlineS}s (timeout + num_retries 0 on chained models)` : ""),
   );
 }
