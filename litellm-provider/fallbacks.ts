@@ -35,6 +35,15 @@ export const DEFAULT_FALLBACKS: Record<string, string[]> = {
   // of a production chain until that reset.
   "mtplx/anthropic/qwen38-27b-optimized-speed-fp16": ["zai/anthropic/glm-5.3-flash"],
   "mtplx/qwen38-27b-optimized-speed-fp16": ["ali/anthropic/qwen3.8-flash"],
+  // Fleet primary (owner directive 2026-11-04): strata/anthropic/q2_0 is
+  // the generic agent model, chained qwen3.8-flash then glm-5.3-flash.
+  // q2_0 is the SMALLEST live group in both dimensions (262144 in /
+  // 131072 out, vs flash 991808/131072 and glm 1024000/131072), so this
+  // chain clamps nothing — the zero-capacity-cost shape. The config tier
+  // carries the same chain as the LITELLM_FALLBACKS override (the
+  // decision surface); this entry is the baked default for pools that
+  // don't set the override (preview, manual).
+  "strata/anthropic/q2_0": ["ali/anthropic/qwen3.8-flash", "zai/anthropic/glm-5.3-flash"],
   "ali/anthropic/qwen3.8-flash": ["zai/anthropic/glm-5.3-flash"],
   // Night-window primary (owner directive): deepseek-v4.1-flash 16:00-02:00
   // CET with glm-5.3-flash as the all-hours second option. The chain is
@@ -137,6 +146,14 @@ export interface ChainedModel {
  * Apply fallback chains to the proxy's discovered model list. Pure: no
  * fetch, no env — the table tests own every branch.
  *
+ * failoverDeadlineS (owner directive 2026-11-14, >0): the swift-shift
+ * lever — a wired chain ALSO carries LiteLLM's request-level
+ * `timeout` + `num_retries: 0` so a silent (busy/queued) primary dies
+ * at the deadline and the proxy fails over immediately, instead of the
+ * proxy default re-queuing the same busy box once per retry. 0 attaches
+ * neither key (the pre-directive shape). See timeout.ts for the
+ * composite pi-wall/proxy-deadline contract.
+ *
  * Contract (r17-review P4/P7):
  * - an unchained model carries NO samplingParams key (an explicit empty
  *   `fallbacks: []` would OVERRIDE proxy-configured fallbacks — the
@@ -155,6 +172,7 @@ export function applyChains(
   models: Array<{ id: string; max_input_tokens?: number; max_output_tokens?: number }>,
   chains: Record<string, string[]>,
   byId: Map<string, { max_input_tokens?: number; max_output_tokens?: number }>,
+  failoverDeadlineS = 0,
 ): { wired: string[]; annotated: ChainedModel[]; unwiredChains: string[] } {
   const wired: string[] = [];
   // Chains keyed by a primary this proxy does not serve are INERT — the
@@ -203,6 +221,14 @@ export function applyChains(
       out.maxTokens = mt;
     }
     out.samplingParams = { fallbacks: chain };
+    if (failoverDeadlineS > 0) {
+      // The reactiveness lever: bound the silent-primary wait and skip
+      // the proxy's default primary retries — first deadline = first
+      // shift. Never on unchained models (a timeout with nowhere to
+      // fail over is just a dead request).
+      out.samplingParams.timeout = failoverDeadlineS;
+      out.samplingParams.num_retries = 0;
+    }
     wired.push(`${model.id} → ${chain.join(", ")}`);
     return out;
   });

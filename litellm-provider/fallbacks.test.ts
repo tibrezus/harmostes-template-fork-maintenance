@@ -36,13 +36,16 @@ test("unparsable JSON degrades loudly to the default", () => {
 // drifted exactly this way once (said flash→speed while the code said
 // flash→glm) — comments are not a pin.
 test("default chain composition covers every live primary (#363, #401 r2)", () => {
-  // Three live primaries in this repo: speed (ops review templates),
-  // flash (this chart's values.yaml default), glm (cmd/harmostes-agent +
+  // Live primaries in this repo: speed (ops review templates, mtplx
+  // retired but the ids may still arrive mid-rollout), q2_0 (the fleet
+  // primary, owner directive 2026-11-04), flash (this chart's values.yaml
+  // default), max (night window), glm (cmd/harmostes-agent +
   // harmostes.py --model default). A live primary with no entry would
   // attach no failover at all — the condition #363 was filed to fix.
   assert.deepEqual(DEFAULT_FALLBACKS, {
     "mtplx/anthropic/qwen38-27b-optimized-speed-fp16": ["zai/anthropic/glm-5.3-flash"],
     "mtplx/qwen38-27b-optimized-speed-fp16": ["ali/anthropic/qwen3.8-flash"],
+    "strata/anthropic/q2_0": ["ali/anthropic/qwen3.8-flash", "zai/anthropic/glm-5.3-flash"],
     "ali/anthropic/qwen3.8-flash": ["zai/anthropic/glm-5.3-flash"],
     "ali/anthropic/deepseek-v4.1-flash": ["zai/anthropic/glm-5.3-flash"],
     "ali/anthropic/qwen3.8-max": ["ali/anthropic/qwen3.8-flash"],
@@ -57,6 +60,7 @@ test("default chain composition covers every live primary (#363, #401 r2)", () =
   const proxy = new Map([
     ["mtplx/anthropic/qwen38-27b-optimized-speed-fp16", { max_input_tokens: 262144, max_output_tokens: 32768 }],
     ["mtplx/qwen38-27b-optimized-speed-fp16", { max_input_tokens: 262144, max_output_tokens: 32768 }],
+    ["strata/anthropic/q2_0", { max_input_tokens: 262144, max_output_tokens: 131072 }],
     ["ali/anthropic/qwen3.8-flash", { max_input_tokens: 1048576, max_output_tokens: 32768 }],
     ["ali/anthropic/qwen3.8-max", { max_input_tokens: 991808, max_output_tokens: 131072 }],
     ["zai/anthropic/glm-5.3-flash", { max_input_tokens: 131072, max_output_tokens: 8192 }],
@@ -75,6 +79,15 @@ test("default chain composition covers every live primary (#363, #401 r2)", () =
   assert.deepEqual(glm.samplingParams, { fallbacks: ["ali/anthropic/qwen3.8-flash"] });
   assert.equal(glm.contextWindow, 131072); // own window — flash is larger, no clamp
   assert.equal(glm.clampNote, undefined);
+  const q2 = annotated.find((m) => m.id === "strata/anthropic/q2_0")!;
+  assert.deepEqual(q2.samplingParams, { fallbacks: ["ali/anthropic/qwen3.8-flash", "zai/anthropic/glm-5.3-flash"] });
+  // This fixture's glm-5.3-flash carries the OLD catalog dims (131072/8192)
+  // so the two-hop chain clamps q2_0 down to it — the clamp math under
+  // test. On the LIVE proxy glm-5.3-flash is 1024000/131072, larger than
+  // q2_0 in both dims: the fleet chain clamps nothing in production.
+  assert.equal(q2.contextWindow, 131072);
+  assert.equal(q2.maxTokens, 8192);
+  assert.match(q2.clampNote!, /ctx 262144→131072, maxTokens 131072→8192/);
   const max = annotated.find((m) => m.id === "ali/anthropic/qwen3.8-max")!;
   assert.deepEqual(max.samplingParams, { fallbacks: ["ali/anthropic/qwen3.8-flash"] });
   assert.equal(max.contextWindow, 991808); // own ctx — the net (flash) is larger on input
@@ -84,12 +97,12 @@ test("default chain composition covers every live primary (#363, #401 r2)", () =
     "ali/anthropic/qwen3.8-max → ali/anthropic/qwen3.8-flash",
     "mtplx/anthropic/qwen38-27b-optimized-speed-fp16 → zai/anthropic/glm-5.3-flash",
     "mtplx/qwen38-27b-optimized-speed-fp16 → ali/anthropic/qwen3.8-flash",
+    "strata/anthropic/q2_0 → ali/anthropic/qwen3.8-flash, zai/anthropic/glm-5.3-flash",
     "zai/anthropic/glm-5.3-flash → ali/anthropic/qwen3.8-flash",
   ]);
   // deepseek-v4.1-flash is in the table but NOT in this proxy map — inert
   // by design (unwired) until the proxy serves it (owner directive).
-  assert.deepEqual(unwiredChains, ["ali/anthropic/deepseek-v4.1-flash"]);
-});
+  assert.deepEqual(unwiredChains, ["ali/anthropic/deepseek-v4.1-flash"]);});
 
 // The documented off-switch, pinned (#401 review r2: it had no test at any
 // layer, while a PARTIAL override silently strips the platform decision —
@@ -115,10 +128,12 @@ test("applyChains: a subset proxy reports exactly the unserved key", () => {
   const twoModels = [...two.entries()].map(([id, m]) => ({ id, ...m }));
   const { wired, unwiredChains } = applyChains(twoModels, DEFAULT_FALLBACKS, two);
   // insertion order of the default table: the anthropic-route speed
-  // primary first, the bare speed alias second, deepseek, max
+  // primary first, the bare speed alias second, the fleet primary q2_0,
+  // deepseek, max
   assert.deepEqual(unwiredChains, [
     "mtplx/anthropic/qwen38-27b-optimized-speed-fp16",
     "mtplx/qwen38-27b-optimized-speed-fp16",
+    "strata/anthropic/q2_0",
     "ali/anthropic/deepseek-v4.1-flash",
     "ali/anthropic/qwen3.8-max",
   ]);
@@ -288,6 +303,7 @@ test("resolveFallbackChains: the default does not leak by reference", () => {
   assert.deepEqual(after, {
     "mtplx/anthropic/qwen38-27b-optimized-speed-fp16": ["zai/anthropic/glm-5.3-flash"],
     "mtplx/qwen38-27b-optimized-speed-fp16": ["ali/anthropic/qwen3.8-flash"],
+    "strata/anthropic/q2_0": ["ali/anthropic/qwen3.8-flash", "zai/anthropic/glm-5.3-flash"],
     "ali/anthropic/qwen3.8-flash": ["zai/anthropic/glm-5.3-flash"],
     "ali/anthropic/deepseek-v4.1-flash": ["zai/anthropic/glm-5.3-flash"],
     "ali/anthropic/qwen3.8-max": ["ali/anthropic/qwen3.8-flash"],
@@ -323,4 +339,61 @@ test("DEFAULT_FALLBACKS: the fleet's pinned review primary (the anthropic-route 
 	for (const net of chains[live]) {
 		assert.notEqual(net, "ali/anthropic/qwen3.8-flash", "the ali flash net is quota-dead until 2026-10-31 — it must not be a production net");
 	}
+});
+
+test("applyChains failover deadline: a wired chain carries timeout + num_retries 0 — the swift-shift lever", () => {
+	// Owner directive 2026-11-14 (reactiveness): the local primary is
+	// attempted first, but a busy local box must not stall the round —
+	// the shift to the cloud fallback happens VIA a timeout. The lever
+	// rides the SAME request-level params as the chain: LiteLLM's
+	// `timeout` bounds the silent-primary wait (next-chunk wait on a
+	// live stream), and `num_retries: 0` skips the proxy's default
+	// primary re-attempts so the FIRST deadline is the shift.
+	const proxy = new Map([
+		["strata/anthropic/q2_0", { max_input_tokens: 262144, max_output_tokens: 131072 }],
+		["ali/anthropic/qwen3.8-flash", { max_input_tokens: 1048576, max_output_tokens: 32768 }],
+	]);
+	const models = [...proxy.entries()].map(([id, m]) => ({ id, ...m }));
+	const chains = { "strata/anthropic/q2_0": ["ali/anthropic/qwen3.8-flash"] };
+
+	const { annotated } = applyChains(models, chains, proxy, 100);
+	const q2 = annotated.find((m) => m.id === "strata/anthropic/q2_0")!;
+	assert.deepEqual(q2.samplingParams, {
+		fallbacks: ["ali/anthropic/qwen3.8-flash"],
+		timeout: 100,
+		num_retries: 0,
+	});
+
+	// deadline 0 (the off-switch, and the default arg): the pre-directive
+	// shape — fallbacks ONLY, no timeout keys. The entire existing table
+	// above pins this shape via 3-arg calls.
+	const off = applyChains(models, chains, proxy, 0);
+	assert.deepEqual(off.annotated.find((m) => m.id === "strata/anthropic/q2_0")!.samplingParams, {
+		fallbacks: ["ali/anthropic/qwen3.8-flash"],
+	});
+	const implicit = applyChains(models, chains, proxy);
+	assert.deepEqual(implicit.annotated.find((m) => m.id === "strata/anthropic/q2_0")!.samplingParams, {
+		fallbacks: ["ali/anthropic/qwen3.8-flash"],
+	});
+
+	// UNCHAINED models never carry the deadline — a timeout with nowhere
+	// to fail over is just a dead request.
+	const flash = annotated.find((m) => m.id === "ali/anthropic/qwen3.8-flash")!;
+	assert.equal(flash.samplingParams, undefined);
+});
+
+test("applyChains failover deadline: an empty-filtering chain attaches nothing even with a deadline", () => {
+	// A chain whose every fallback id is undiscovered filters to empty —
+	// no samplingParams AT ALL, deadline or not (the wiring-summary log
+	// distinguishes "none configured" from "configured but none wired").
+	const proxy = new Map([["strata/anthropic/q2_0", {}]]);
+	const { annotated, wired } = applyChains(
+		[{ id: "strata/anthropic/q2_0" }],
+		{ "strata/anthropic/q2_0": ["ghost/group"] },
+		proxy,
+		100,
+	);
+	assert.equal(annotated[0].samplingParams, undefined);
+	assert.deepEqual(wired, []);
+	assert.deepEqual(annotated[0].droppedIds, ["ghost/group"]);
 });
