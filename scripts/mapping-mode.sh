@@ -108,6 +108,18 @@ mapping_walk() {
          -m "RZ/sync: $theirs → $ours ($sync_date)" \
          "upstream/$theirs"; then
       echo "  merged clean — validating (repo-local delegate: $MAPPING_VALIDATE_CMD)"
+      # #627 residue: the marker gate, BEFORE validation and push. A clean
+      # merge can still carry marker TEXT (an upstream commit that added a
+      # conflict-marker line merges without conflict) — the same vacuous-
+      # gates class sync mode guards at its final assertion. The delegate
+      # cannot be trusted to scan: it is repo-local and may only build.
+      local marker_files
+      marker_files=$(git grep -l -E '^(<<<<<<<|>>>>>>>|=======) ' -- . 2>/dev/null || true)
+      if [ -n "$marker_files" ]; then
+        echo "ERROR: conflict markers present after a clean merge of $theirs → $ours; nothing pushed" >&2
+        echo "$marker_files" | sed 's/^/  - /' >&2
+        return 1
+      fi
       if bash "$MAPPING_VALIDATE_CMD" "$base"; then
         # Regen output (SDK/tidy) rides on top of the merge commit.
         if ! git diff --quiet || ! git diff --cached --quiet; then
