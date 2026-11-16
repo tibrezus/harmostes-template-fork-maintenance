@@ -393,6 +393,19 @@ result_json() {
 phase_merge() {
   WORKDIR=$(mktemp -d)
 
+  # Credentials BEFORE the first network git op. The historical order
+  # (clone → host_setup) made the fork clone ANONYMOUS: it worked only
+  # while fork repos were public, and the org privacy flip (~2026-10-29)
+  # turned every private-fork clone into exit-128 "could not read
+  # Username" (live: the dev canary, dead since; found again 2026-11-16
+  # during the fleet health check). host_setup writes the credential
+  # store the clone then uses — the later fetches/pushes already ran
+  # post-setup, which is why only the CLONE was broken.
+  # shellcheck source=scripts/git-host.sh
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/git-host.sh"
+  host_setup
+
   echo ""
   echo "=== Cloning fork (shallow) ==="
   # --depth implies --single-branch: the clone carries only the fork's
@@ -405,10 +418,6 @@ phase_merge() {
   cd "$WORKDIR"
   git fetch --depth 100 origin "refs/heads/$FORK_DEFAULT_BRANCH:refs/remotes/origin/$FORK_DEFAULT_BRANCH" 2>/dev/null || true
 
-  # shellcheck source=scripts/git-host.sh
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/git-host.sh"
-  host_setup
 
   # The upstream-host fetch: `upstream/<branch>` refs feed the merge-base
   # check. (The removed phased mode aliased the fork URL here to merge the
